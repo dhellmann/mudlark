@@ -12,10 +12,10 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
-var urlPattern *regexp.Regexp
+var pullRequestURLPattern *regexp.Regexp
 
 func init() {
-	urlPattern = regexp.MustCompile("https://github.com/\\S+")
+	pullRequestURLPattern = regexp.MustCompile("https://github.com/(?P<org>[^/]+)/(?P<repo>[^/]+)/pull/(?P<id>\\d+)")
 }
 
 type jiraSettings struct {
@@ -66,11 +66,13 @@ func issueTitleLine(issue *jira.Issue) string {
 func getLinks(issue *jira.Issue) []string {
 	results := []string{}
 
-	results = append(results, urlPattern.FindAllString(issue.Fields.Description, -1)...)
+	results = append(results,
+		pullRequestURLPattern.FindAllString(issue.Fields.Description, -1)...)
 
 	if issue.Fields.Comments != nil {
 		for _, comment := range issue.Fields.Comments.Comments {
-			results = append(results, urlPattern.FindAllString(comment.Body, -1)...)
+			results = append(results,
+				pullRequestURLPattern.FindAllString(comment.Body, -1)...)
 		}
 	}
 
