@@ -163,11 +163,11 @@ func getLinks(issue *jira.Issue) []string {
 	return results
 }
 
-func showPRStatus(settings *appSettings, clients *serviceClients, pullRequest *github.PullRequest, org, repo string, prefix string) (string, error) {
+func showPRStatus(settings *appSettings, clients *serviceClients, pullRequest *github.PullRequest, prefix string) (string, error) {
 	ctx := context.Background()
 	status := *pullRequest.State
 	isMerged, _, err := clients.github.PullRequests.IsMerged(ctx,
-		org, repo, *pullRequest.Number)
+		*pullRequest.Base.Repo.Owner.Login, *pullRequest.Base.Repo.Name, *pullRequest.Number)
 	if err != nil {
 		return "", errors.Wrap(err,
 			fmt.Sprintf("could not fetch merge status of pull request %d",
@@ -193,6 +193,8 @@ func processLinks(settings *appSettings, clients *serviceClients, cache *cache, 
 	ctx := context.Background()
 	for _, url := range links {
 
+		// parse the URL to find the args we need for interacting with
+		// github's API
 		match := pullRequestURLPattern.FindStringSubmatch(url)
 		org := match[1]
 		repo := match[2]
@@ -210,19 +212,23 @@ func processLinks(settings *appSettings, clients *serviceClients, cache *cache, 
 		}
 
 		if org == settings.DownstreamOrg {
-			showPRStatus(settings, clients, pullRequest, org, repo, "    downstream")
+			_, err := showPRStatus(settings, clients, pullRequest, "    downstream")
+			if err != nil {
+				return errors.Wrap(err,
+					fmt.Sprintf("could not show status of %s", *pullRequest.HTMLURL))
+			}
 			continue
 		}
 
-		status, err := showPRStatus(settings, clients, pullRequest, org, repo, "    upstream")
+		status, err := showPRStatus(settings, clients, pullRequest, "    upstream")
 		if err != nil {
 			return errors.Wrap(err,
 				fmt.Sprintf("could not show status of %s", *pullRequest.HTMLURL))
 		}
 
 		if status == "closed" {
-			// We don't care if there is no matching downstream PR
-			// if we closed the upstream one without merging it.
+			// We don't care if there is no matching downstream PR if
+			// we closed the upstream one without merging it.
 			continue
 		}
 
@@ -241,10 +247,25 @@ func processLinks(settings *appSettings, clients *serviceClients, cache *cache, 
 				return errors.Wrap(err, "could not find downstream pull requests")
 			}
 
-			if len(otherPRs) == 0 {
-				// look in the cache for commit messages that
-				// include the SHA, indicating a reference during
-				// a cherry-pick
+			// look for pull requests containing the same commits via
+			// the github API
+			for _, otherPR := range otherPRs {
+				if *otherPR.HTMLURL == url {
+					// the API returns our own PR even when we ask
+					// for the ones from the downstream PR
+					continue
+				}
+				if _, ok := otherIDs[*otherPR.Number]; ok {
+					continue
+				}
+				otherIDs[*otherPR.Number] = true
+
+				showPRStatus(settings, clients, otherPR, "      downstream")
+			}
+
+			// look in the cache for commit messages that include the
+			// SHA, indicating a reference during a cherry-pick
+			if len(otherIDs) == 0 {
 				cachedDetails, err := cache.getDetails(settings, clients,
 					settings.DownstreamOrg, repo)
 				if err != nil {
@@ -259,26 +280,10 @@ func processLinks(settings *appSettings, clients *serviceClients, cache *cache, 
 								continue
 							}
 							otherIDs[*pr.Number] = true
-							showPRStatus(settings, clients, pr,
-								settings.DownstreamOrg, repo, "      downstream")
+							showPRStatus(settings, clients, pr, "      downstream")
 						}
 					}
 				}
-			}
-
-			for _, otherPR := range otherPRs {
-				if *otherPR.HTMLURL == url {
-					// the API returns our own PR even when we ask
-					// for the ones from the downstream PR
-					continue
-				}
-				if _, ok := otherIDs[*otherPR.Number]; ok {
-					continue
-				}
-				otherIDs[*otherPR.Number] = true
-
-				showPRStatus(settings, clients, pullRequest,
-					settings.DownstreamOrg, repo, "      downstream")
 			}
 		}
 
