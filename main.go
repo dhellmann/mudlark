@@ -19,8 +19,6 @@ import (
 
 var pullRequestURLPattern *regexp.Regexp
 
-const downstreamOrg string = "openshift"
-
 func init() {
 	pullRequestURLPattern = regexp.MustCompile("https://github.com/(?P<org>[^/]+)/(?P<repo>[^/]+)/pull/(?P<id>\\d+)")
 }
@@ -36,8 +34,9 @@ type githubSettings struct {
 }
 
 type appSettings struct {
-	Jira   jiraSettings   `yaml:"jira"`
-	Github githubSettings `yaml:"github"`
+	Jira          jiraSettings   `yaml:"jira"`
+	Github        githubSettings `yaml:"github"`
+	DownstreamOrg string         `yaml:"downstreamOrg"`
 }
 
 type serviceClients struct {
@@ -70,6 +69,10 @@ func loadSettings(filename string) (*appSettings, error) {
 
 	if result.Github.Token == "" {
 		return nil, fmt.Errorf("No github.token found in %s", filename)
+	}
+
+	if result.DownstreamOrg == "" {
+		return nil, fmt.Errorf("No downstreamOrg found in %s", filename)
 	}
 
 	return &result, nil
@@ -131,7 +134,7 @@ func processLinks(settings *appSettings, clients *serviceClients, links []string
 			status = "merged"
 		}
 
-		if org == downstreamOrg {
+		if org == settings.DownstreamOrg {
 			fmt.Printf("  downstream (%s): %s\n", status, url)
 		} else {
 			fmt.Printf("  upstream (%s): %s\n", status, url)
@@ -151,7 +154,7 @@ func processLinks(settings *appSettings, clients *serviceClients, links []string
 			otherIDs := make(map[int]bool)
 			for _, c := range commits {
 				otherPRs, _, err := clients.github.PullRequests.ListPullRequestsWithCommit(
-					ctx, downstreamOrg, repo, *c.SHA, nil)
+					ctx, settings.DownstreamOrg, repo, *c.SHA, nil)
 				if err != nil {
 					return errors.Wrap(err, "could not find downstream pull requests")
 				}
@@ -170,7 +173,7 @@ func processLinks(settings *appSettings, clients *serviceClients, links []string
 
 					downstreamStatus := *pullRequest.State
 					downstreamIsMerged, _, err := clients.github.PullRequests.IsMerged(ctx,
-						downstreamOrg, repo, *otherPR.Number)
+						settings.DownstreamOrg, repo, *otherPR.Number)
 					if err != nil {
 						return errors.Wrap(err,
 							fmt.Sprintf("could not fetch merge status of pull request %d", *otherPR.Number))
@@ -188,7 +191,7 @@ func processLinks(settings *appSettings, clients *serviceClients, links []string
 
 			if len(otherIDs) == 0 {
 				fmt.Printf("    downstream: no pull requests found for %s/%s\n",
-					downstreamOrg, repo,
+					settings.DownstreamOrg, repo,
 				)
 				continue
 			}
