@@ -71,10 +71,10 @@ func loadSettings(filename string) (*appSettings, error) {
 }
 
 func issueTitleLine(issue *jira.Issue) string {
-	return fmt.Sprintf("%s %s (%s) %q",
+	return fmt.Sprintf("%s (%s) https://issues.redhat.com/browse/%s %q",
 		issue.Fields.Type.Name,
-		issue.Key,
 		issue.Fields.Status.Name,
+		issue.Key,
 		issue.Fields.Summary,
 	)
 }
