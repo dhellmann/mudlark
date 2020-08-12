@@ -40,6 +40,11 @@ type appSettings struct {
 	Github githubSettings `yaml:"github"`
 }
 
+type serviceClients struct {
+	jira   *jira.Client
+	github *github.Client
+}
+
 func loadSettings(filename string) (*appSettings, error) {
 
 	content, err := ioutil.ReadFile(filename)
@@ -96,7 +101,7 @@ func getLinks(issue *jira.Issue) []string {
 	return results
 }
 
-func processLinks(client *github.Client, links []string) error {
+func processLinks(settings *appSettings, clients *serviceClients, links []string) error {
 	ctx := context.Background()
 	for _, url := range links {
 
@@ -110,14 +115,14 @@ func processLinks(client *github.Client, links []string) error {
 				fmt.Sprintf("could not convert pull request id %q to integer", idStr))
 		}
 
-		pullRequest, _, err := client.PullRequests.Get(ctx, org, repo, id)
+		pullRequest, _, err := clients.github.PullRequests.Get(ctx, org, repo, id)
 		if err != nil {
 			return errors.Wrap(err,
 				fmt.Sprintf("could not fetch pull request %q", idStr))
 		}
 
 		status := *pullRequest.State
-		isMerged, _, err := client.PullRequests.IsMerged(ctx, org, repo, id)
+		isMerged, _, err := clients.github.PullRequests.IsMerged(ctx, org, repo, id)
 		if err != nil {
 			return errors.Wrap(err,
 				fmt.Sprintf("could not fetch merge status of pull request %q", idStr))
@@ -137,7 +142,7 @@ func processLinks(client *github.Client, links []string) error {
 				continue
 			}
 
-			commits, _, err := client.PullRequests.ListCommits(ctx, org, repo, id, nil)
+			commits, _, err := clients.github.PullRequests.ListCommits(ctx, org, repo, id, nil)
 			if err != nil {
 				return errors.Wrap(err,
 					fmt.Sprintf("could not list commits in pull request %q", idStr))
@@ -145,7 +150,7 @@ func processLinks(client *github.Client, links []string) error {
 
 			otherIDs := make(map[int]bool)
 			for _, c := range commits {
-				otherPRs, _, err := client.PullRequests.ListPullRequestsWithCommit(
+				otherPRs, _, err := clients.github.PullRequests.ListPullRequestsWithCommit(
 					ctx, downstreamOrg, repo, *c.SHA, nil)
 				if err != nil {
 					return errors.Wrap(err, "could not find downstream pull requests")
@@ -164,7 +169,7 @@ func processLinks(client *github.Client, links []string) error {
 					otherIDs[*otherPR.Number] = true
 
 					downstreamStatus := *pullRequest.State
-					downstreamIsMerged, _, err := client.PullRequests.IsMerged(ctx,
+					downstreamIsMerged, _, err := clients.github.PullRequests.IsMerged(ctx,
 						downstreamOrg, repo, *otherPR.Number)
 					if err != nil {
 						return errors.Wrap(err,
@@ -186,6 +191,42 @@ func processLinks(client *github.Client, links []string) error {
 					downstreamOrg, repo,
 				)
 				continue
+			}
+		}
+	}
+	return nil
+}
+
+func processOneIssue(settings *appSettings, clients *serviceClients, issueID string) error {
+	issue, _, err := clients.jira.Issue.Get(issueID, nil)
+	if err != nil {
+		return errors.Wrap(err, fmt.Sprintf("error processing issue %q", issueID))
+	}
+	fmt.Printf("%s\n", issueTitleLine(issue, settings.Jira.URL))
+
+	processLinks(settings, clients, getLinks(issue))
+
+	if issue.Fields.Type.Name == "Epic" {
+		searchOptions := jira.SearchOptions{
+			Expand: "comments",
+		}
+		search := fmt.Sprintf("\"Epic Link\" = %s", issueID)
+		stories, _, err := clients.jira.Issue.Search(search, &searchOptions)
+		if err != nil {
+			return errors.Wrap(err, fmt.Sprintf("could not find stories in epic %s", issueID))
+		}
+
+		if len(stories) != 0 {
+			for _, story := range stories {
+				// The search results do not include comments, so we have to
+				// fetch tickets when we need the comments.
+				storyDetails, _, err := clients.jira.Issue.Get(story.Key, nil)
+				if err != nil {
+					return errors.Wrap(err,
+						fmt.Sprintf("could not fetch story details for %q", story.Key))
+				}
+				fmt.Printf("  %s\n", issueTitleLine(storyDetails, settings.Jira.URL))
+				processLinks(settings, clients, getLinks(storyDetails))
 			}
 		}
 	}
@@ -234,41 +275,15 @@ func main() {
 	oauthClient := oauth2.NewClient(ctx, tokenSource)
 	githubClient := github.NewClient(oauthClient)
 
-	searchOptions := jira.SearchOptions{
-		Expand: "comments",
+	clients := &serviceClients{
+		jira:   jiraClient,
+		github: githubClient,
 	}
 
 	for _, issueID := range flag.Args() {
-		issue, _, err := jiraClient.Issue.Get(issueID, nil)
+		err := processOneIssue(settings, clients, issueID)
 		if err != nil {
 			fmt.Printf("ERROR: %s\n", err)
-			continue
-		}
-		fmt.Printf("%s\n", issueTitleLine(issue, settings.Jira.URL))
-
-		processLinks(githubClient, getLinks(issue))
-
-		if issue.Fields.Type.Name == "Epic" {
-			search := fmt.Sprintf("\"Epic Link\" = %s", issueID)
-			stories, _, err := jiraClient.Issue.Search(search, &searchOptions)
-			if err != nil {
-				fmt.Printf("ERROR finding stories in epic: %s\n", err)
-				continue
-			}
-
-			if len(stories) != 0 {
-				for _, story := range stories {
-					// The search results do not include comments, so we have to
-					// fetch tickets when we need the comments.
-					storyDetails, _, err := jiraClient.Issue.Get(story.Key, nil)
-					if err != nil {
-						fmt.Printf("ERROR fetching story %s: %s\n", story.Key, err)
-						continue
-					}
-					fmt.Printf("  %s\n", issueTitleLine(storyDetails, settings.Jira.URL))
-					processLinks(githubClient, getLinks(storyDetails))
-				}
-			}
 		}
 	}
 
