@@ -179,8 +179,9 @@ func showPRStatus(settings *appSettings, clients *serviceClients, pullRequest *g
 		status = "OPEN"
 	}
 
-	fmt.Printf("%s (%s): %s\n",
+	fmt.Printf("%s on %s %s: %s\n",
 		prefix,
+		*pullRequest.Base.Ref,
 		status,
 		*pullRequest.HTMLURL,
 	)
