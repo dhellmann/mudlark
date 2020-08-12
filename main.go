@@ -162,6 +162,9 @@ func showPRStatus(settings *appSettings, clients *serviceClients, pullRequest *g
 	if downstreamIsMerged {
 		downstreamStatus = "merged"
 	}
+	if downstreamStatus == "open" {
+		downstreamStatus = "OPEN"
+	}
 
 	fmt.Printf("    downstream (%s): %s\n",
 		downstreamStatus,
@@ -198,6 +201,9 @@ func processLinks(settings *appSettings, clients *serviceClients, cache *cache, 
 		}
 		if isMerged {
 			status = "merged"
+		}
+		if status == "open" {
+			status = "OPEN"
 		}
 
 		if org == settings.DownstreamOrg {
