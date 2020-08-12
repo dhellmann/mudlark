@@ -1,18 +1,25 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"io/ioutil"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 
 	"github.com/andygrunwald/go-jira"
+	"github.com/google/go-github/github"
+	"github.com/pkg/errors"
+	"golang.org/x/oauth2"
 	"gopkg.in/yaml.v2"
 )
 
 var pullRequestURLPattern *regexp.Regexp
+
+const downstreamOrg string = "openshift"
 
 func init() {
 	pullRequestURLPattern = regexp.MustCompile("https://github.com/(?P<org>[^/]+)/(?P<repo>[^/]+)/pull/(?P<id>\\d+)")
@@ -24,8 +31,13 @@ type jiraSettings struct {
 	URL      string `yaml:"url"`
 }
 
+type githubSettings struct {
+	Token string `yaml:"token"`
+}
+
 type appSettings struct {
-	Jira jiraSettings `yaml:"jira"`
+	Jira   jiraSettings   `yaml:"jira"`
+	Github githubSettings `yaml:"github"`
 }
 
 func loadSettings(filename string) (*appSettings, error) {
@@ -49,6 +61,10 @@ func loadSettings(filename string) (*appSettings, error) {
 	}
 	if result.Jira.Password == "" {
 		return nil, fmt.Errorf("No jira.password found in %s", filename)
+	}
+
+	if result.Github.Token == "" {
+		return nil, fmt.Errorf("No github.token found in %s", filename)
 	}
 
 	return &result, nil
@@ -77,6 +93,81 @@ func getLinks(issue *jira.Issue) []string {
 	}
 
 	return results
+}
+
+func getPRsForCommit(client *github.Client, org, repo, sha string) ([]*github.PullRequest, error) {
+	ctx := context.Background()
+
+	u := fmt.Sprintf("repos/%v/%v/commits/%v/pulls", org, repo, sha)
+	req, err := client.NewRequest("GET", u, nil)
+	if err != nil {
+		return nil, err
+	}
+	// TODO: remove custom Accept header when this API fully launches.
+	req.Header.Set("Accept", "application/vnd.github.groot-preview+json")
+
+	var pulls []*github.PullRequest
+	_, err = client.Do(ctx, req, &pulls)
+	if err != nil {
+		return nil, err
+	}
+
+	return pulls, nil
+}
+
+func processLinks(client *github.Client, links []string) error {
+	ctx := context.Background()
+	for _, url := range links {
+		fmt.Printf("  PR: %s\n", url)
+		match := pullRequestURLPattern.FindStringSubmatch(url)
+		org := match[1]
+		repo := match[2]
+		idStr := match[3]
+		id, err := strconv.Atoi(idStr)
+		if err != nil {
+			return errors.Wrap(err,
+				fmt.Sprintf("could not convert pull request id %q to integer", idStr))
+		}
+		pullRequest, _, err := client.PullRequests.Get(ctx, org, repo, id)
+		if err != nil {
+			return errors.Wrap(err,
+				fmt.Sprintf("could not fetch pull request %q", idStr))
+		}
+		if org == downstreamOrg {
+			fmt.Printf("    downstream\n")
+		} else {
+			fmt.Printf("    upstream\n")
+			commits, _, err := client.PullRequests.ListCommits(ctx, org, repo, id, nil)
+			if err != nil {
+				return errors.Wrap(err,
+					fmt.Sprintf("could not list commits in pull request %q", idStr))
+			}
+			for _, c := range commits {
+				fmt.Printf("      commit: %s\n", *c.SHA)
+				otherPRs, err := getPRsForCommit(client, downstreamOrg, repo, *c.SHA)
+				if err != nil {
+					return errors.Wrap(err, "could not find downstream pull requests")
+				}
+				for _, otherPR := range otherPRs {
+					if *otherPR.HTMLURL == url {
+						// the API returns our own PR even when we ask
+						// for the ones from the downstream PR
+						continue
+					}
+					isMerged := "no"
+					if otherPR.Merged != nil && *otherPR.Merged {
+						isMerged = "yes"
+					}
+					fmt.Printf("      downstream PR: %d %s\n", *otherPR.Number, isMerged)
+					if otherPR.MergedAt != nil {
+						fmt.Printf("      %v\n", *otherPR.MergedAt)
+					}
+				}
+			}
+		}
+		fmt.Printf("    state: %s\n", *pullRequest.State)
+	}
+	return nil
 }
 
 func main() {
@@ -114,6 +205,13 @@ func main() {
 		os.Exit(1)
 	}
 
+	ctx := context.Background()
+	tokenSource := oauth2.StaticTokenSource(
+		&oauth2.Token{AccessToken: settings.Github.Token},
+	)
+	oauthClient := oauth2.NewClient(ctx, tokenSource)
+	githubClient := github.NewClient(oauthClient)
+
 	searchOptions := jira.SearchOptions{
 		Expand: "comments",
 	}
@@ -126,9 +224,7 @@ func main() {
 		}
 		fmt.Printf("%s\n", issueTitleLine(issue))
 
-		for _, url := range getLinks(issue) {
-			fmt.Printf("  link: %s\n", url)
-		}
+		processLinks(githubClient, getLinks(issue))
 
 		if issue.Fields.Type.Name == "Epic" {
 			search := fmt.Sprintf("\"Epic Link\" = %s", issueID)
@@ -148,10 +244,7 @@ func main() {
 						continue
 					}
 					fmt.Printf("  %s\n", issueTitleLine(storyDetails))
-					for _, url := range getLinks(storyDetails) {
-						fmt.Printf("    link: %s\n", url)
-					}
-
+					processLinks(githubClient, getLinks(storyDetails))
 				}
 			}
 		}
