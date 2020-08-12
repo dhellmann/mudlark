@@ -188,7 +188,7 @@ func showPRStatus(settings *appSettings, clients *serviceClients, pullRequest *g
 	return status, nil
 }
 
-func processLinks(settings *appSettings, clients *serviceClients, cache *cache, links []string) error {
+func processLinks(settings *appSettings, clients *serviceClients, cache *cache, links []string, indent string) error {
 
 	ctx := context.Background()
 	for _, url := range links {
@@ -260,7 +260,8 @@ func processLinks(settings *appSettings, clients *serviceClients, cache *cache, 
 				}
 				otherIDs[*otherPR.Number] = true
 
-				showPRStatus(settings, clients, otherPR, "      downstream")
+				showPRStatus(settings, clients, otherPR,
+					fmt.Sprintf("%s    downstream", indent))
 			}
 
 			// look in the cache for commit messages that include the
@@ -280,7 +281,8 @@ func processLinks(settings *appSettings, clients *serviceClients, cache *cache, 
 								continue
 							}
 							otherIDs[*pr.Number] = true
-							showPRStatus(settings, clients, pr, "      downstream")
+							showPRStatus(settings, clients, pr,
+								fmt.Sprintf("%s    downstream", indent))
 						}
 					}
 				}
@@ -288,8 +290,8 @@ func processLinks(settings *appSettings, clients *serviceClients, cache *cache, 
 		}
 
 		if len(otherIDs) == 0 {
-			fmt.Printf("    downstream: no matching pull requests found in %s/%s\n",
-				settings.DownstreamOrg, repo,
+			fmt.Printf("%s  downstream: no matching pull requests found in %s/%s\n",
+				indent, settings.DownstreamOrg, repo,
 			)
 			continue
 		}
@@ -297,14 +299,20 @@ func processLinks(settings *appSettings, clients *serviceClients, cache *cache, 
 	return nil
 }
 
-func processOneIssue(settings *appSettings, clients *serviceClients, cache *cache, issueID string) error {
+func processOneIssue(settings *appSettings, clients *serviceClients, cache *cache, issueID string, indent string) error {
 	issue, _, err := clients.jira.Issue.Get(issueID, nil)
 	if err != nil {
 		return errors.Wrap(err, fmt.Sprintf("error processing issue %q", issueID))
 	}
-	fmt.Printf("%s\n", issueTitleLine(issue, settings.Jira.URL))
+	fmt.Printf("\n%s%s\n", indent, issueTitleLine(issue, settings.Jira.URL))
 
-	processLinks(settings, clients, cache, getLinks(issue))
+	// processLinks(settings, clients, cache, getLinks(issue))
+	links := getLinks(issue)
+	if len(links) == 0 {
+		fmt.Printf("%s  no github links found\n", indent)
+	} else {
+		processLinks(settings, clients, cache, links, indent+"  ")
+	}
 
 	if issue.Fields.Type.Name == "Epic" {
 		searchOptions := jira.SearchOptions{
@@ -317,20 +325,10 @@ func processOneIssue(settings *appSettings, clients *serviceClients, cache *cach
 		}
 
 		for _, story := range stories {
-			// The search results do not include comments, so we have to
-			// fetch tickets when we need the comments.
-			storyDetails, _, err := clients.jira.Issue.Get(story.Key, nil)
+			err := processOneIssue(settings, clients, cache, story.Key, indent+"  ")
 			if err != nil {
-				return errors.Wrap(err,
-					fmt.Sprintf("could not fetch story details for %q", story.Key))
+				return errors.Wrap(err, fmt.Sprintf("could not process %s", story.Key))
 			}
-			fmt.Printf("  %s\n", issueTitleLine(storyDetails, settings.Jira.URL))
-			links := getLinks(storyDetails)
-			if len(links) == 0 {
-				fmt.Printf("    no github links found\n")
-				continue
-			}
-			processLinks(settings, clients, cache, links)
 		}
 	}
 	return nil
@@ -407,7 +405,7 @@ func main() {
 	}
 
 	for _, issueID := range flag.Args() {
-		err := processOneIssue(settings, clients, cache, issueID)
+		err := processOneIssue(settings, clients, cache, issueID, "")
 		if err != nil {
 			fmt.Printf("ERROR: %s\n", err)
 		}
