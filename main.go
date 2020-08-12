@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 
 	"github.com/andygrunwald/go-jira"
 	"github.com/google/go-github/v32/github"
@@ -42,6 +43,15 @@ type appSettings struct {
 type serviceClients struct {
 	jira   *jira.Client
 	github *github.Client
+}
+
+type repoPRCache struct {
+	pullRequests []*github.PullRequest
+	commits      map[int][]*github.RepositoryCommit
+}
+
+type cache struct {
+	pullRequestsByRepo map[string]repoPRCache
 }
 
 func loadSettings(filename string) (*appSettings, error) {
@@ -104,7 +114,28 @@ func getLinks(issue *jira.Issue) []string {
 	return results
 }
 
-func processLinks(settings *appSettings, clients *serviceClients, links []string) error {
+func showPRStatus(settings *appSettings, clients *serviceClients, pullRequest *github.PullRequest, org, repo string) error {
+	ctx := context.Background()
+	downstreamStatus := *pullRequest.State
+	downstreamIsMerged, _, err := clients.github.PullRequests.IsMerged(ctx,
+		org, repo, *pullRequest.Number)
+	if err != nil {
+		return errors.Wrap(err,
+			fmt.Sprintf("could not fetch merge status of pull request %d",
+				*pullRequest.Number))
+	}
+	if downstreamIsMerged {
+		downstreamStatus = "merged"
+	}
+
+	fmt.Printf("    downstream (%s): %s\n",
+		downstreamStatus,
+		*pullRequest.HTMLURL,
+	)
+	return nil
+}
+
+func processLinks(settings *appSettings, clients *serviceClients, cache *cache, links []string) error {
 	ctx := context.Background()
 	for _, url := range links {
 
@@ -145,7 +176,8 @@ func processLinks(settings *appSettings, clients *serviceClients, links []string
 				continue
 			}
 
-			commits, _, err := clients.github.PullRequests.ListCommits(ctx, org, repo, id, nil)
+			commits, _, err := clients.github.PullRequests.ListCommits(
+				ctx, org, repo, id, nil)
 			if err != nil {
 				return errors.Wrap(err,
 					fmt.Sprintf("could not list commits in pull request %q", idStr))
@@ -159,6 +191,51 @@ func processLinks(settings *appSettings, clients *serviceClients, links []string
 					return errors.Wrap(err, "could not find downstream pull requests")
 				}
 
+				if len(otherPRs) == 0 {
+					// look in the cache for commit messages that
+					// include the SHA, indicating a reference during
+					// a cherry-pick
+					repoKey := fmt.Sprintf("%s/%s", settings.DownstreamOrg, repo)
+					prCache, ok := cache.pullRequestsByRepo[repoKey]
+					if !ok {
+						prs, _, err := clients.github.PullRequests.List(
+							ctx, settings.DownstreamOrg, repo,
+							&github.PullRequestListOptions{State: "all"},
+						)
+						if err != nil {
+							return errors.Wrap(err,
+								fmt.Sprintf("could not get pull requests for %s", repoKey))
+						}
+						fmt.Printf("    caching details of %s\n", repoKey)
+						prCache = repoPRCache{
+							pullRequests: prs,
+							commits:      make(map[int][]*github.RepositoryCommit),
+						}
+						cache.pullRequestsByRepo[repoKey] = prCache
+						for _, pr := range prs {
+							commits, _, err := clients.github.PullRequests.ListCommits(
+								ctx, settings.DownstreamOrg, repo, *pr.Number, nil)
+							if err != nil {
+								return errors.Wrap(err,
+									fmt.Sprintf("could not get commits for pull request %d", *pr.Number))
+							}
+							prCache.commits[*pr.Number] = commits
+						}
+					}
+					for _, pr := range prCache.pullRequests {
+						//fmt.Printf("checking for cherry-picks in %s\n", *pr.HTMLURL)
+						for _, otherCommit := range prCache.commits[*pr.Number] {
+							if strings.Contains(*otherCommit.Commit.Message, *c.SHA) {
+								if _, ok := otherIDs[*pr.Number]; ok {
+									continue
+								}
+								otherIDs[*pr.Number] = true
+								showPRStatus(settings, clients, pr, settings.DownstreamOrg, repo)
+							}
+						}
+					}
+				}
+
 				for _, otherPR := range otherPRs {
 					if *otherPR.HTMLURL == url {
 						// the API returns our own PR even when we ask
@@ -168,24 +245,9 @@ func processLinks(settings *appSettings, clients *serviceClients, links []string
 					if _, ok := otherIDs[*otherPR.Number]; ok {
 						continue
 					}
-
 					otherIDs[*otherPR.Number] = true
 
-					downstreamStatus := *pullRequest.State
-					downstreamIsMerged, _, err := clients.github.PullRequests.IsMerged(ctx,
-						settings.DownstreamOrg, repo, *otherPR.Number)
-					if err != nil {
-						return errors.Wrap(err,
-							fmt.Sprintf("could not fetch merge status of pull request %d", *otherPR.Number))
-					}
-					if downstreamIsMerged {
-						downstreamStatus = "merged"
-					}
-
-					fmt.Printf("    downstream (%s): %s\n",
-						downstreamStatus,
-						*otherPR.HTMLURL,
-					)
+					showPRStatus(settings, clients, pullRequest, settings.DownstreamOrg, repo)
 				}
 			}
 
@@ -200,14 +262,14 @@ func processLinks(settings *appSettings, clients *serviceClients, links []string
 	return nil
 }
 
-func processOneIssue(settings *appSettings, clients *serviceClients, issueID string) error {
+func processOneIssue(settings *appSettings, clients *serviceClients, cache *cache, issueID string) error {
 	issue, _, err := clients.jira.Issue.Get(issueID, nil)
 	if err != nil {
 		return errors.Wrap(err, fmt.Sprintf("error processing issue %q", issueID))
 	}
 	fmt.Printf("%s\n", issueTitleLine(issue, settings.Jira.URL))
 
-	processLinks(settings, clients, getLinks(issue))
+	processLinks(settings, clients, cache, getLinks(issue))
 
 	if issue.Fields.Type.Name == "Epic" {
 		searchOptions := jira.SearchOptions{
@@ -229,7 +291,7 @@ func processOneIssue(settings *appSettings, clients *serviceClients, issueID str
 						fmt.Sprintf("could not fetch story details for %q", story.Key))
 				}
 				fmt.Printf("  %s\n", issueTitleLine(storyDetails, settings.Jira.URL))
-				processLinks(settings, clients, getLinks(storyDetails))
+				processLinks(settings, clients, cache, getLinks(storyDetails))
 			}
 		}
 	}
@@ -283,8 +345,12 @@ func main() {
 		github: githubClient,
 	}
 
+	cache := &cache{
+		pullRequestsByRepo: make(map[string]repoPRCache),
+	}
+
 	for _, issueID := range flag.Args() {
-		err := processOneIssue(settings, clients, issueID)
+		err := processOneIssue(settings, clients, cache, issueID)
 		if err != nil {
 			fmt.Printf("ERROR: %s\n", err)
 		}
