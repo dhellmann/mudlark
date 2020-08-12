@@ -115,10 +115,20 @@ func getPRsForCommit(client *github.Client, org, repo, sha string) ([]*github.Pu
 	return pulls, nil
 }
 
+func getPRStatus(pr *github.PullRequest) (status string) {
+	if pr.Merged != nil && *pr.Merged {
+		return "merged"
+	}
+	if pr.MergedAt != nil {
+		return "merged"
+	}
+	return *pr.State
+}
+
 func processLinks(client *github.Client, links []string) error {
 	ctx := context.Background()
 	for _, url := range links {
-		fmt.Printf("  PR: %s\n", url)
+
 		match := pullRequestURLPattern.FindStringSubmatch(url)
 		org := match[1]
 		repo := match[2]
@@ -128,44 +138,65 @@ func processLinks(client *github.Client, links []string) error {
 			return errors.Wrap(err,
 				fmt.Sprintf("could not convert pull request id %q to integer", idStr))
 		}
+
 		pullRequest, _, err := client.PullRequests.Get(ctx, org, repo, id)
 		if err != nil {
 			return errors.Wrap(err,
 				fmt.Sprintf("could not fetch pull request %q", idStr))
 		}
+
+		status := getPRStatus(pullRequest)
+
 		if org == downstreamOrg {
-			fmt.Printf("    downstream\n")
+			fmt.Printf("  downstream (%s): %s\n", status, url)
 		} else {
-			fmt.Printf("    upstream\n")
+			fmt.Printf("  upstream (%s): %s\n", status, url)
+
+			if status == "closed" {
+				// We don't care if there is no matching downstream PR
+				// if we closed the upstream one without merging it.
+				continue
+			}
+
 			commits, _, err := client.PullRequests.ListCommits(ctx, org, repo, id, nil)
 			if err != nil {
 				return errors.Wrap(err,
 					fmt.Sprintf("could not list commits in pull request %q", idStr))
 			}
+
+			otherIDs := make(map[int]bool)
 			for _, c := range commits {
-				fmt.Printf("      commit: %s\n", *c.SHA)
 				otherPRs, err := getPRsForCommit(client, downstreamOrg, repo, *c.SHA)
 				if err != nil {
 					return errors.Wrap(err, "could not find downstream pull requests")
 				}
+
 				for _, otherPR := range otherPRs {
 					if *otherPR.HTMLURL == url {
 						// the API returns our own PR even when we ask
 						// for the ones from the downstream PR
 						continue
 					}
-					isMerged := "no"
-					if otherPR.Merged != nil && *otherPR.Merged {
-						isMerged = "yes"
+					if _, ok := otherIDs[*otherPR.Number]; ok {
+						continue
 					}
-					fmt.Printf("      downstream PR: %d %s\n", *otherPR.Number, isMerged)
-					if otherPR.MergedAt != nil {
-						fmt.Printf("      %v\n", *otherPR.MergedAt)
-					}
+
+					otherIDs[*otherPR.Number] = true
+					downstreamStatus := getPRStatus(otherPR)
+					fmt.Printf("    downstream (%s): %s\n",
+						downstreamStatus,
+						*otherPR.HTMLURL,
+					)
 				}
 			}
+
+			if len(otherIDs) == 0 {
+				fmt.Printf("    downstream: no pull requests found for %s/%s\n",
+					downstreamOrg, repo,
+				)
+				continue
+			}
 		}
-		fmt.Printf("    state: %s\n", *pullRequest.State)
 	}
 	return nil
 }
