@@ -54,6 +54,41 @@ type cache struct {
 	pullRequestsByRepo map[string]repoPRCache
 }
 
+func (c *cache) getDetails(settings *appSettings, clients *serviceClients, org, repo string) (*repoPRCache, error) {
+	ctx := context.Background()
+	repoKey := fmt.Sprintf("%s/%s", org, repo)
+	prCache, ok := c.pullRequestsByRepo[repoKey]
+
+	if !ok {
+		prs, _, err := clients.github.PullRequests.List(
+			ctx, org, repo,
+			&github.PullRequestListOptions{State: "all"},
+		)
+		if err != nil {
+			return nil, errors.Wrap(err,
+				fmt.Sprintf("could not get pull requests for %s", repoKey))
+		}
+
+		fmt.Printf("    caching details of %s\n", repoKey)
+		prCache = repoPRCache{
+			pullRequests: prs,
+			commits:      make(map[int][]*github.RepositoryCommit),
+		}
+		c.pullRequestsByRepo[repoKey] = prCache
+
+		for _, pr := range prs {
+			commits, _, err := clients.github.PullRequests.ListCommits(
+				ctx, org, repo, *pr.Number, nil)
+			if err != nil {
+				return nil, errors.Wrap(err,
+					fmt.Sprintf("could not get commits for pull request %d", *pr.Number))
+			}
+			prCache.commits[*pr.Number] = commits
+		}
+	}
+	return &prCache, nil
+}
+
 func loadSettings(filename string) (*appSettings, error) {
 
 	content, err := ioutil.ReadFile(filename)
@@ -195,42 +230,23 @@ func processLinks(settings *appSettings, clients *serviceClients, cache *cache, 
 					// look in the cache for commit messages that
 					// include the SHA, indicating a reference during
 					// a cherry-pick
-					repoKey := fmt.Sprintf("%s/%s", settings.DownstreamOrg, repo)
-					prCache, ok := cache.pullRequestsByRepo[repoKey]
-					if !ok {
-						prs, _, err := clients.github.PullRequests.List(
-							ctx, settings.DownstreamOrg, repo,
-							&github.PullRequestListOptions{State: "all"},
-						)
-						if err != nil {
-							return errors.Wrap(err,
-								fmt.Sprintf("could not get pull requests for %s", repoKey))
-						}
-						fmt.Printf("    caching details of %s\n", repoKey)
-						prCache = repoPRCache{
-							pullRequests: prs,
-							commits:      make(map[int][]*github.RepositoryCommit),
-						}
-						cache.pullRequestsByRepo[repoKey] = prCache
-						for _, pr := range prs {
-							commits, _, err := clients.github.PullRequests.ListCommits(
-								ctx, settings.DownstreamOrg, repo, *pr.Number, nil)
-							if err != nil {
-								return errors.Wrap(err,
-									fmt.Sprintf("could not get commits for pull request %d", *pr.Number))
-							}
-							prCache.commits[*pr.Number] = commits
-						}
+					cachedDetails, err := cache.getDetails(settings, clients,
+						settings.DownstreamOrg, repo)
+					if err != nil {
+						return errors.Wrap(err,
+							fmt.Sprintf("could not build cache of details for %s/%s",
+								settings.DownstreamOrg, repo))
 					}
-					for _, pr := range prCache.pullRequests {
+					for _, pr := range cachedDetails.pullRequests {
 						//fmt.Printf("checking for cherry-picks in %s\n", *pr.HTMLURL)
-						for _, otherCommit := range prCache.commits[*pr.Number] {
+						for _, otherCommit := range cachedDetails.commits[*pr.Number] {
 							if strings.Contains(*otherCommit.Commit.Message, *c.SHA) {
 								if _, ok := otherIDs[*pr.Number]; ok {
 									continue
 								}
 								otherIDs[*pr.Number] = true
-								showPRStatus(settings, clients, pr, settings.DownstreamOrg, repo)
+								showPRStatus(settings, clients, pr,
+									settings.DownstreamOrg, repo)
 							}
 						}
 					}
