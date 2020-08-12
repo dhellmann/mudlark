@@ -70,10 +70,11 @@ func loadSettings(filename string) (*appSettings, error) {
 	return &result, nil
 }
 
-func issueTitleLine(issue *jira.Issue) string {
-	return fmt.Sprintf("%s (%s) https://issues.redhat.com/browse/%s %q",
+func issueTitleLine(issue *jira.Issue, jiraURL string) string {
+	return fmt.Sprintf("%s (%s) %s/browse/%s %q",
 		issue.Fields.Type.Name,
 		issue.Fields.Status.Name,
+		jiraURL,
 		issue.Key,
 		issue.Fields.Summary,
 	)
@@ -253,7 +254,7 @@ func main() {
 			fmt.Printf("ERROR: %s\n", err)
 			continue
 		}
-		fmt.Printf("%s\n", issueTitleLine(issue))
+		fmt.Printf("%s\n", issueTitleLine(issue, settings.Jira.URL))
 
 		processLinks(githubClient, getLinks(issue))
 
@@ -274,7 +275,7 @@ func main() {
 						fmt.Printf("ERROR fetching story %s: %s\n", story.Key, err)
 						continue
 					}
-					fmt.Printf("  %s\n", issueTitleLine(storyDetails))
+					fmt.Printf("  %s\n", issueTitleLine(storyDetails, settings.Jira.URL))
 					processLinks(githubClient, getLinks(storyDetails))
 				}
 			}
