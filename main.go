@@ -149,28 +149,29 @@ func getLinks(issue *jira.Issue) []string {
 	return results
 }
 
-func showPRStatus(settings *appSettings, clients *serviceClients, pullRequest *github.PullRequest, org, repo string) error {
+func showPRStatus(settings *appSettings, clients *serviceClients, pullRequest *github.PullRequest, org, repo string, prefix string) (string, error) {
 	ctx := context.Background()
-	downstreamStatus := *pullRequest.State
-	downstreamIsMerged, _, err := clients.github.PullRequests.IsMerged(ctx,
+	status := *pullRequest.State
+	isMerged, _, err := clients.github.PullRequests.IsMerged(ctx,
 		org, repo, *pullRequest.Number)
 	if err != nil {
-		return errors.Wrap(err,
+		return "", errors.Wrap(err,
 			fmt.Sprintf("could not fetch merge status of pull request %d",
 				*pullRequest.Number))
 	}
-	if downstreamIsMerged {
-		downstreamStatus = "merged"
+	if isMerged {
+		status = "merged"
 	}
-	if downstreamStatus == "open" {
-		downstreamStatus = "OPEN"
+	if status == "open" {
+		status = "OPEN"
 	}
 
-	fmt.Printf("    downstream (%s): %s\n",
-		downstreamStatus,
+	fmt.Printf("%s (%s): %s\n",
+		prefix,
+		status,
 		*pullRequest.HTMLURL,
 	)
-	return nil
+	return status, nil
 }
 
 func processLinks(settings *appSettings, clients *serviceClients, cache *cache, links []string) error {
@@ -193,23 +194,14 @@ func processLinks(settings *appSettings, clients *serviceClients, cache *cache, 
 				fmt.Sprintf("could not fetch pull request %q", idStr))
 		}
 
-		status := *pullRequest.State
-		isMerged, _, err := clients.github.PullRequests.IsMerged(ctx, org, repo, id)
-		if err != nil {
-			return errors.Wrap(err,
-				fmt.Sprintf("could not fetch merge status of pull request %q", idStr))
-		}
-		if isMerged {
-			status = "merged"
-		}
-		if status == "open" {
-			status = "OPEN"
-		}
-
 		if org == settings.DownstreamOrg {
-			fmt.Printf("  downstream (%s): %s\n", status, url)
+			showPRStatus(settings, clients, pullRequest, org, repo, "  downstream")
 		} else {
-			fmt.Printf("  upstream (%s): %s\n", status, url)
+			status, err := showPRStatus(settings, clients, pullRequest, org, repo, "  upstream")
+			if err != nil {
+				return errors.Wrap(err,
+					fmt.Sprintf("could not show status of %s", *pullRequest.HTMLURL))
+			}
 
 			if status == "closed" {
 				// We don't care if there is no matching downstream PR
@@ -244,7 +236,6 @@ func processLinks(settings *appSettings, clients *serviceClients, cache *cache, 
 								settings.DownstreamOrg, repo))
 					}
 					for _, pr := range cachedDetails.pullRequests {
-						//fmt.Printf("checking for cherry-picks in %s\n", *pr.HTMLURL)
 						for _, otherCommit := range cachedDetails.commits[*pr.Number] {
 							if strings.Contains(*otherCommit.Commit.Message, *c.SHA) {
 								if _, ok := otherIDs[*pr.Number]; ok {
@@ -252,7 +243,7 @@ func processLinks(settings *appSettings, clients *serviceClients, cache *cache, 
 								}
 								otherIDs[*pr.Number] = true
 								showPRStatus(settings, clients, pr,
-									settings.DownstreamOrg, repo)
+									settings.DownstreamOrg, repo, "    downstream")
 							}
 						}
 					}
@@ -269,12 +260,13 @@ func processLinks(settings *appSettings, clients *serviceClients, cache *cache, 
 					}
 					otherIDs[*otherPR.Number] = true
 
-					showPRStatus(settings, clients, pullRequest, settings.DownstreamOrg, repo)
+					showPRStatus(settings, clients, pullRequest,
+						settings.DownstreamOrg, repo, "    downstream")
 				}
 			}
 
 			if len(otherIDs) == 0 {
-				fmt.Printf("    downstream: no pull requests found for %s/%s\n",
+				fmt.Printf("    downstream: no matching pull requests found in %s/%s\n",
 					settings.DownstreamOrg, repo,
 				)
 				continue
