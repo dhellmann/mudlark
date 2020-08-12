@@ -67,7 +67,6 @@ func (c *cache) getDetails(settings *appSettings, clients *serviceClients, org, 
 			commits:      make(map[int][]*github.RepositoryCommit),
 		}
 		c.pullRequestsByRepo[repoKey] = prCache
-		fmt.Printf("    caching details of %s\n", repoKey)
 
 		opts := &github.PullRequestListOptions{
 			State: "all",
@@ -212,7 +211,8 @@ func processLinks(settings *appSettings, clients *serviceClients, cache *cache, 
 		}
 
 		if org == settings.DownstreamOrg {
-			_, err := showPRStatus(settings, clients, pullRequest, "    downstream")
+			_, err := showPRStatus(settings, clients, pullRequest,
+				fmt.Sprintf("%s  downstream", indent))
 			if err != nil {
 				return errors.Wrap(err,
 					fmt.Sprintf("could not show status of %s", *pullRequest.HTMLURL))
@@ -220,7 +220,8 @@ func processLinks(settings *appSettings, clients *serviceClients, cache *cache, 
 			continue
 		}
 
-		status, err := showPRStatus(settings, clients, pullRequest, "    upstream")
+		status, err := showPRStatus(settings, clients, pullRequest,
+			fmt.Sprintf("%s  upstream", indent))
 		if err != nil {
 			return errors.Wrap(err,
 				fmt.Sprintf("could not show status of %s", *pullRequest.HTMLURL))
@@ -290,7 +291,7 @@ func processLinks(settings *appSettings, clients *serviceClients, cache *cache, 
 		}
 
 		if len(otherIDs) == 0 {
-			fmt.Printf("%s  downstream: no matching pull requests found in %s/%s\n",
+			fmt.Printf("%s    downstream: no matching pull requests found in %s/%s\n",
 				indent, settings.DownstreamOrg, repo,
 			)
 			continue
@@ -314,7 +315,8 @@ func processOneIssue(settings *appSettings, clients *serviceClients, cache *cach
 		processLinks(settings, clients, cache, links, indent+"  ")
 	}
 
-	if issue.Fields.Type.Name == "Epic" {
+	switch issue.Fields.Type.Name {
+	case "Epic":
 		searchOptions := jira.SearchOptions{
 			Expand: "comments",
 		}
@@ -330,6 +332,14 @@ func processOneIssue(settings *appSettings, clients *serviceClients, cache *cach
 				return errors.Wrap(err, fmt.Sprintf("could not process %s", story.Key))
 			}
 		}
+	case "Story":
+		for _, task := range issue.Fields.Subtasks {
+			err := processOneIssue(settings, clients, cache, task.Key, indent+"  ")
+			if err != nil {
+				return errors.Wrap(err, fmt.Sprintf("could not process %s", task.Key))
+			}
+		}
+	default:
 	}
 	return nil
 }
