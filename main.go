@@ -96,26 +96,6 @@ func getLinks(issue *jira.Issue) []string {
 	return results
 }
 
-func getPRsForCommit(client *github.Client, org, repo, sha string) ([]*github.PullRequest, error) {
-	ctx := context.Background()
-
-	u := fmt.Sprintf("repos/%v/%v/commits/%v/pulls", org, repo, sha)
-	req, err := client.NewRequest("GET", u, nil)
-	if err != nil {
-		return nil, err
-	}
-	// TODO: remove custom Accept header when this API fully launches.
-	req.Header.Set("Accept", "application/vnd.github.groot-preview+json")
-
-	var pulls []*github.PullRequest
-	_, err = client.Do(ctx, req, &pulls)
-	if err != nil {
-		return nil, err
-	}
-
-	return pulls, nil
-}
-
 func processLinks(client *github.Client, links []string) error {
 	ctx := context.Background()
 	for _, url := range links {
@@ -165,7 +145,8 @@ func processLinks(client *github.Client, links []string) error {
 
 			otherIDs := make(map[int]bool)
 			for _, c := range commits {
-				otherPRs, err := getPRsForCommit(client, downstreamOrg, repo, *c.SHA)
+				otherPRs, _, err := client.PullRequests.ListPullRequestsWithCommit(
+					ctx, downstreamOrg, repo, *c.SHA, nil)
 				if err != nil {
 					return errors.Wrap(err, "could not find downstream pull requests")
 				}
