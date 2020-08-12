@@ -54,36 +54,50 @@ type cache struct {
 	pullRequestsByRepo map[string]repoPRCache
 }
 
+const githubPageSize int = 50
+
 func (c *cache) getDetails(settings *appSettings, clients *serviceClients, org, repo string) (*repoPRCache, error) {
 	ctx := context.Background()
 	repoKey := fmt.Sprintf("%s/%s", org, repo)
 	prCache, ok := c.pullRequestsByRepo[repoKey]
 
 	if !ok {
-		prs, _, err := clients.github.PullRequests.List(
-			ctx, org, repo,
-			&github.PullRequestListOptions{State: "all"},
-		)
-		if err != nil {
-			return nil, errors.Wrap(err,
-				fmt.Sprintf("could not get pull requests for %s", repoKey))
-		}
-
-		fmt.Printf("      caching details of %s\n", repoKey)
 		prCache = repoPRCache{
-			pullRequests: prs,
+			pullRequests: []*github.PullRequest{},
 			commits:      make(map[int][]*github.RepositoryCommit),
 		}
 		c.pullRequestsByRepo[repoKey] = prCache
+		fmt.Printf("    caching details of %s\n", repoKey)
 
-		for _, pr := range prs {
-			commits, _, err := clients.github.PullRequests.ListCommits(
-				ctx, org, repo, *pr.Number, nil)
+		opts := &github.PullRequestListOptions{
+			State: "all",
+			ListOptions: github.ListOptions{
+				PerPage: githubPageSize,
+			},
+		}
+
+		for {
+			prs, response, err := clients.github.PullRequests.List(ctx, org, repo, opts)
 			if err != nil {
 				return nil, errors.Wrap(err,
-					fmt.Sprintf("could not get commits for pull request %d", *pr.Number))
+					fmt.Sprintf("could not get pull requests for %s", repoKey))
 			}
-			prCache.commits[*pr.Number] = commits
+			prCache.pullRequests = append(prCache.pullRequests, prs...)
+
+			for _, pr := range prs {
+				commits, _, err := clients.github.PullRequests.ListCommits(
+					ctx, org, repo, *pr.Number, nil)
+				if err != nil {
+					return nil, errors.Wrap(err,
+						fmt.Sprintf("could not get commits for pull request %d", *pr.Number))
+				}
+				prCache.commits[*pr.Number] = commits
+			}
+
+			if response.NextPage == 0 {
+				break
+			}
+			opts.Page = response.NextPage
 		}
 	}
 	return &prCache, nil
