@@ -116,16 +116,6 @@ func getPRsForCommit(client *github.Client, org, repo, sha string) ([]*github.Pu
 	return pulls, nil
 }
 
-func getPRStatus(pr *github.PullRequest) (status string) {
-	if pr.Merged != nil && *pr.Merged {
-		return "merged"
-	}
-	if pr.MergedAt != nil {
-		return "merged"
-	}
-	return *pr.State
-}
-
 func processLinks(client *github.Client, links []string) error {
 	ctx := context.Background()
 	for _, url := range links {
@@ -146,7 +136,15 @@ func processLinks(client *github.Client, links []string) error {
 				fmt.Sprintf("could not fetch pull request %q", idStr))
 		}
 
-		status := getPRStatus(pullRequest)
+		status := *pullRequest.State
+		isMerged, _, err := client.PullRequests.IsMerged(ctx, org, repo, id)
+		if err != nil {
+			return errors.Wrap(err,
+				fmt.Sprintf("could not fetch merge status of pull request %q", idStr))
+		}
+		if isMerged {
+			status = "merged"
+		}
 
 		if org == downstreamOrg {
 			fmt.Printf("  downstream (%s): %s\n", status, url)
@@ -183,7 +181,18 @@ func processLinks(client *github.Client, links []string) error {
 					}
 
 					otherIDs[*otherPR.Number] = true
-					downstreamStatus := getPRStatus(otherPR)
+
+					downstreamStatus := *pullRequest.State
+					downstreamIsMerged, _, err := client.PullRequests.IsMerged(ctx,
+						downstreamOrg, repo, *otherPR.Number)
+					if err != nil {
+						return errors.Wrap(err,
+							fmt.Sprintf("could not fetch merge status of pull request %d", *otherPR.Number))
+					}
+					if downstreamIsMerged {
+						downstreamStatus = "merged"
+					}
+
 					fmt.Printf("    downstream (%s): %s\n",
 						downstreamStatus,
 						*otherPR.HTMLURL,
