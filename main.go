@@ -336,6 +336,16 @@ func processOneIssue(settings *appSettings, clients *serviceClients, cache *cach
 	return nil
 }
 
+// fileExists checks if a file exists and is not a directory before we
+// try using it to prevent further errors.
+func fileExists(filename string) bool {
+	info, err := os.Stat(filename)
+	if os.IsNotExist(err) {
+		return false
+	}
+	return !info.IsDir()
+}
+
 func main() {
 	configDir, err := os.UserConfigDir()
 	if err != nil {
@@ -351,6 +361,15 @@ func main() {
 
 	if *configFilename == "" {
 		fmt.Fprintf(os.Stderr, "Please specify the -config file name")
+		os.Exit(1)
+	}
+
+	if !fileExists(*configFilename) {
+		template, _ := yaml.Marshal(appSettings{})
+		fmt.Fprintf(os.Stderr, "Please create %s containing\n\n%s\n",
+			*configFilename,
+			string(template),
+		)
 		os.Exit(1)
 	}
 
