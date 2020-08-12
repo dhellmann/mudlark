@@ -69,7 +69,7 @@ func (c *cache) getDetails(settings *appSettings, clients *serviceClients, org, 
 				fmt.Sprintf("could not get pull requests for %s", repoKey))
 		}
 
-		fmt.Printf("    caching details of %s\n", repoKey)
+		fmt.Printf("      caching details of %s\n", repoKey)
 		prCache = repoPRCache{
 			pullRequests: prs,
 			commits:      make(map[int][]*github.RepositoryCommit),
@@ -175,6 +175,7 @@ func showPRStatus(settings *appSettings, clients *serviceClients, pullRequest *g
 }
 
 func processLinks(settings *appSettings, clients *serviceClients, cache *cache, links []string) error {
+
 	ctx := context.Background()
 	for _, url := range links {
 
@@ -195,82 +196,83 @@ func processLinks(settings *appSettings, clients *serviceClients, cache *cache, 
 		}
 
 		if org == settings.DownstreamOrg {
-			showPRStatus(settings, clients, pullRequest, org, repo, "  downstream")
-		} else {
-			status, err := showPRStatus(settings, clients, pullRequest, org, repo, "  upstream")
+			showPRStatus(settings, clients, pullRequest, org, repo, "    downstream")
+			continue
+		}
+
+		status, err := showPRStatus(settings, clients, pullRequest, org, repo, "    upstream")
+		if err != nil {
+			return errors.Wrap(err,
+				fmt.Sprintf("could not show status of %s", *pullRequest.HTMLURL))
+		}
+
+		if status == "closed" {
+			// We don't care if there is no matching downstream PR
+			// if we closed the upstream one without merging it.
+			continue
+		}
+
+		commits, _, err := clients.github.PullRequests.ListCommits(
+			ctx, org, repo, id, nil)
+		if err != nil {
+			return errors.Wrap(err,
+				fmt.Sprintf("could not list commits in pull request %q", idStr))
+		}
+
+		otherIDs := make(map[int]bool)
+		for _, c := range commits {
+			otherPRs, _, err := clients.github.PullRequests.ListPullRequestsWithCommit(
+				ctx, settings.DownstreamOrg, repo, *c.SHA, nil)
 			if err != nil {
-				return errors.Wrap(err,
-					fmt.Sprintf("could not show status of %s", *pullRequest.HTMLURL))
+				return errors.Wrap(err, "could not find downstream pull requests")
 			}
 
-			if status == "closed" {
-				// We don't care if there is no matching downstream PR
-				// if we closed the upstream one without merging it.
-				continue
-			}
-
-			commits, _, err := clients.github.PullRequests.ListCommits(
-				ctx, org, repo, id, nil)
-			if err != nil {
-				return errors.Wrap(err,
-					fmt.Sprintf("could not list commits in pull request %q", idStr))
-			}
-
-			otherIDs := make(map[int]bool)
-			for _, c := range commits {
-				otherPRs, _, err := clients.github.PullRequests.ListPullRequestsWithCommit(
-					ctx, settings.DownstreamOrg, repo, *c.SHA, nil)
+			if len(otherPRs) == 0 {
+				// look in the cache for commit messages that
+				// include the SHA, indicating a reference during
+				// a cherry-pick
+				cachedDetails, err := cache.getDetails(settings, clients,
+					settings.DownstreamOrg, repo)
 				if err != nil {
-					return errors.Wrap(err, "could not find downstream pull requests")
+					return errors.Wrap(err,
+						fmt.Sprintf("could not build cache of details for %s/%s",
+							settings.DownstreamOrg, repo))
 				}
-
-				if len(otherPRs) == 0 {
-					// look in the cache for commit messages that
-					// include the SHA, indicating a reference during
-					// a cherry-pick
-					cachedDetails, err := cache.getDetails(settings, clients,
-						settings.DownstreamOrg, repo)
-					if err != nil {
-						return errors.Wrap(err,
-							fmt.Sprintf("could not build cache of details for %s/%s",
-								settings.DownstreamOrg, repo))
-					}
-					for _, pr := range cachedDetails.pullRequests {
-						for _, otherCommit := range cachedDetails.commits[*pr.Number] {
-							if strings.Contains(*otherCommit.Commit.Message, *c.SHA) {
-								if _, ok := otherIDs[*pr.Number]; ok {
-									continue
-								}
-								otherIDs[*pr.Number] = true
-								showPRStatus(settings, clients, pr,
-									settings.DownstreamOrg, repo, "    downstream")
+				for _, pr := range cachedDetails.pullRequests {
+					for _, otherCommit := range cachedDetails.commits[*pr.Number] {
+						if strings.Contains(*otherCommit.Commit.Message, *c.SHA) {
+							if _, ok := otherIDs[*pr.Number]; ok {
+								continue
 							}
+							otherIDs[*pr.Number] = true
+							showPRStatus(settings, clients, pr,
+								settings.DownstreamOrg, repo, "      downstream")
 						}
 					}
 				}
+			}
 
-				for _, otherPR := range otherPRs {
-					if *otherPR.HTMLURL == url {
-						// the API returns our own PR even when we ask
-						// for the ones from the downstream PR
-						continue
-					}
-					if _, ok := otherIDs[*otherPR.Number]; ok {
-						continue
-					}
-					otherIDs[*otherPR.Number] = true
-
-					showPRStatus(settings, clients, pullRequest,
-						settings.DownstreamOrg, repo, "    downstream")
+			for _, otherPR := range otherPRs {
+				if *otherPR.HTMLURL == url {
+					// the API returns our own PR even when we ask
+					// for the ones from the downstream PR
+					continue
 				}
-			}
+				if _, ok := otherIDs[*otherPR.Number]; ok {
+					continue
+				}
+				otherIDs[*otherPR.Number] = true
 
-			if len(otherIDs) == 0 {
-				fmt.Printf("    downstream: no matching pull requests found in %s/%s\n",
-					settings.DownstreamOrg, repo,
-				)
-				continue
+				showPRStatus(settings, clients, pullRequest,
+					settings.DownstreamOrg, repo, "      downstream")
 			}
+		}
+
+		if len(otherIDs) == 0 {
+			fmt.Printf("    downstream: no matching pull requests found in %s/%s\n",
+				settings.DownstreamOrg, repo,
+			)
+			continue
 		}
 	}
 	return nil
@@ -295,18 +297,21 @@ func processOneIssue(settings *appSettings, clients *serviceClients, cache *cach
 			return errors.Wrap(err, fmt.Sprintf("could not find stories in epic %s", issueID))
 		}
 
-		if len(stories) != 0 {
-			for _, story := range stories {
-				// The search results do not include comments, so we have to
-				// fetch tickets when we need the comments.
-				storyDetails, _, err := clients.jira.Issue.Get(story.Key, nil)
-				if err != nil {
-					return errors.Wrap(err,
-						fmt.Sprintf("could not fetch story details for %q", story.Key))
-				}
-				fmt.Printf("  %s\n", issueTitleLine(storyDetails, settings.Jira.URL))
-				processLinks(settings, clients, cache, getLinks(storyDetails))
+		for _, story := range stories {
+			// The search results do not include comments, so we have to
+			// fetch tickets when we need the comments.
+			storyDetails, _, err := clients.jira.Issue.Get(story.Key, nil)
+			if err != nil {
+				return errors.Wrap(err,
+					fmt.Sprintf("could not fetch story details for %q", story.Key))
 			}
+			fmt.Printf("  %s\n", issueTitleLine(storyDetails, settings.Jira.URL))
+			links := getLinks(storyDetails)
+			if len(links) == 0 {
+				fmt.Printf("    no github links found\n")
+				continue
+			}
+			processLinks(settings, clients, cache, links)
 		}
 	}
 	return nil
