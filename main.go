@@ -39,6 +39,7 @@ type appSettings struct {
 	Jira          jiraSettings   `yaml:"jira"`
 	Github        githubSettings `yaml:"github"`
 	DownstreamOrg string         `yaml:"downstreamOrg"`
+	verbose       bool
 }
 
 type serviceClients struct {
@@ -250,6 +251,10 @@ func processLinks(settings *appSettings, clients *serviceClients, cache *cache, 
 	ctx := context.Background()
 	for i, url := range links {
 
+		if settings.verbose {
+			fmt.Fprintf(os.Stderr, "getting details for %s\n", url)
+		}
+
 		result := &results[i]
 		result.url = url
 
@@ -408,6 +413,9 @@ func showLinkResults(settings *appSettings, results []linkResult, indent string)
 }
 
 func processOneIssue(settings *appSettings, clients *serviceClients, cache *cache, issueID string) (*issueResult, error) {
+	if settings.verbose {
+		fmt.Fprintf(os.Stderr, "getting details for %s\n", issueID)
+	}
 	result := &issueResult{}
 
 	issue, _, err := clients.jira.Issue.Get(issueID, nil)
@@ -526,6 +534,7 @@ func main() {
 
 	configFilename := flag.String("config", configFilenameDefault,
 		"the configuration file name")
+	verbose := flag.Bool("v", false, "verbose mode")
 
 	flag.Parse()
 
@@ -548,6 +557,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Could not load config file %s: %v", *configFilename, err)
 		os.Exit(1)
 	}
+	settings.verbose = *verbose
 
 	tp := jira.BasicAuthTransport{
 		Username: settings.Jira.User,
