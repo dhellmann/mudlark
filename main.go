@@ -395,7 +395,7 @@ func processLinks(settings *appSettings, clients *serviceClients, cache *cache, 
 		resultsByURL[result.url] = result
 	}
 	results := []*linkResult{}
-	for _, url := range links {
+	for _, url := range uniqueStrings(links) {
 		if result, ok := resultsByURL[url]; ok {
 			results = append(results, result)
 		}
@@ -535,7 +535,7 @@ func processIssues(settings *appSettings, clients *serviceClients, cache *cache,
 		resultsByID[result.issue.Key] = result
 	}
 	results := []*issueResult{}
-	for _, id := range ids {
+	for _, id := range uniqueStrings(ids) {
 		if result, ok := resultsByID[id]; ok {
 			results = append(results, result)
 		}
