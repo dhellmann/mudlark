@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io/ioutil"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -299,14 +300,24 @@ func processOneLink(settings *appSettings, clients *serviceClients, cache *cache
 	otherIDs := make(map[int]bool)
 	otherLinks := []string{}
 	for _, c := range commits {
-		otherPRs, _, err := clients.github.PullRequests.ListPullRequestsWithCommit(
-			ctx, settings.DownstreamOrg, result.repo, *c.SHA, nil)
-		if err != nil {
-			return nil, errors.Wrap(err, "could not find downstream pull requests")
-		}
 
 		// look for pull requests containing the same commits via
 		// the github API
+		otherPRs, response, err := clients.github.PullRequests.ListPullRequestsWithCommit(
+			ctx, settings.DownstreamOrg, result.repo, *c.SHA, nil)
+		if err != nil {
+			if response.StatusCode == http.StatusNotFound {
+				// The repository hasn't been forked downstream. Treat
+				// it as not an error and break out of this loop.
+				if settings.verbose {
+					fmt.Fprintf(os.Stderr, "no downstream repository %s/%s, skipping\n",
+						settings.DownstreamOrg, result.repo)
+				}
+				break
+			}
+			return nil, errors.Wrap(err, "could not find downstream pull requests")
+		}
+
 		for _, otherPR := range otherPRs {
 			if *otherPR.HTMLURL == url {
 				// the API returns our own PR even when we ask
