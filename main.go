@@ -442,21 +442,17 @@ func processOneIssue(settings *appSettings, clients *serviceClients, cache *cach
 				fmt.Sprintf("could not find sub-issues related to %s", issueID))
 		}
 
-		for _, child := range children {
-			childResult, err := processOneIssue(settings, clients, cache, child.Key)
-			if err != nil {
-				return nil, errors.Wrap(err, fmt.Sprintf("could not process %s", child.Key))
-			}
-			result.children = append(result.children, childResult)
+		childIDs := make([]string, len(children))
+		for i, child := range children {
+			childIDs[i] = child.Key
 		}
+		result.children = processIssues(settings, clients, cache, childIDs)
 	case "Story":
-		for _, task := range issue.Fields.Subtasks {
-			childResult, err := processOneIssue(settings, clients, cache, task.Key)
-			if err != nil {
-				return nil, errors.Wrap(err, fmt.Sprintf("could not process %s", task.Key))
-			}
-			result.children = append(result.children, childResult)
+		childIDs := make([]string, len(issue.Fields.Subtasks))
+		for i, task := range issue.Fields.Subtasks {
+			childIDs[i] = task.Key
 		}
+		result.children = processIssues(settings, clients, cache, childIDs)
 	default:
 	}
 	return result, nil
