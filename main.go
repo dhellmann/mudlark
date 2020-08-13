@@ -317,20 +317,25 @@ func processOneIssue(settings *appSettings, clients *serviceClients, cache *cach
 	}
 
 	switch issue.Fields.Type.Name {
-	case "Epic":
+	case "Epic", "Feature":
 		searchOptions := jira.SearchOptions{
 			Expand: "comments",
 		}
-		search := fmt.Sprintf("\"Epic Link\" = %s", issueID)
-		stories, _, err := clients.jira.Issue.Search(search, &searchOptions)
+		searchTerm := "Epic Link"
+		if issue.Fields.Type.Name == "Feature" {
+			searchTerm = "Parent Link"
+		}
+		search := fmt.Sprintf("\"%s\" = %s", searchTerm, issueID)
+		children, _, err := clients.jira.Issue.Search(search, &searchOptions)
 		if err != nil {
-			return errors.Wrap(err, fmt.Sprintf("could not find stories in epic %s", issueID))
+			return errors.Wrap(err,
+				fmt.Sprintf("could not find sub-tickets related to %s", issueID))
 		}
 
-		for _, story := range stories {
-			err := processOneIssue(settings, clients, cache, story.Key, indent+"  ")
+		for _, child := range children {
+			err := processOneIssue(settings, clients, cache, child.Key, indent+"  ")
 			if err != nil {
-				return errors.Wrap(err, fmt.Sprintf("could not process %s", story.Key))
+				return errors.Wrap(err, fmt.Sprintf("could not process %s", child.Key))
 			}
 		}
 	case "Story":
