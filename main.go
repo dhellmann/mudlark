@@ -542,6 +542,7 @@ func main() {
 		result, err := processOneIssue(settings, clients, cache, issueID, "")
 		if err != nil {
 			fmt.Printf("ERROR: %s\n", err)
+			continue
 		}
 		showOneIssueResult(settings, result, "")
 	}
