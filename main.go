@@ -209,7 +209,7 @@ func getLinks(issue *jira.Issue) []string {
 		}
 	}
 
-	return uniqueStrings(results)
+	return results
 }
 
 func getPRStatus(settings *appSettings, clients *serviceClients, pullRequest *github.PullRequest) (pullRequestWithStatus, error) {
@@ -372,7 +372,7 @@ func processLinks(settings *appSettings, clients *serviceClients, cache *cache, 
 	var wg sync.WaitGroup
 	resultChan := make(chan *linkResult)
 
-	for _, url := range links {
+	for _, url := range uniqueStrings(links) {
 		wg.Add(1)
 		go func(url string, ch chan<- *linkResult) {
 			defer wg.Done()
@@ -510,7 +510,7 @@ func processIssues(settings *appSettings, clients *serviceClients, cache *cache,
 	var wg sync.WaitGroup
 	resultChan := make(chan *issueResult)
 
-	for _, issueID := range ids {
+	for _, issueID := range uniqueStrings(ids) {
 		wg.Add(1)
 		go func(issueID string, ch chan<- *issueResult) {
 			defer wg.Done()
