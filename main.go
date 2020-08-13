@@ -77,12 +77,12 @@ type linkResult struct {
 	repo         string
 	id           int
 	prWithStatus pullRequestWithStatus
-	others       []linkResult
+	others       []*linkResult
 }
 
 type issueResult struct {
 	issue       *jira.Issue
-	linkResults []linkResult
+	linkResults []*linkResult
 	children    []*issueResult
 }
 
@@ -244,149 +244,134 @@ func parsePRURL(url string) (org, repo string, id int, err error) {
 	return
 }
 
-func processLinks(settings *appSettings, clients *serviceClients, cache *cache, links []string) ([]linkResult, error) {
+func processOneLink(settings *appSettings, clients *serviceClients, cache *cache, url string) (*linkResult, error) {
+	if settings.verbose {
+		fmt.Fprintf(os.Stderr, "getting details for %s\n", url)
+	}
 
-	results := make([]linkResult, len(links))
-
+	result := &linkResult{
+		url: url,
+	}
 	ctx := context.Background()
-	for i, url := range links {
 
-		if settings.verbose {
-			fmt.Fprintf(os.Stderr, "getting details for %s\n", url)
-		}
+	// parse the URL to find the args we need for interacting with
+	// github's API
+	org, repo, id, err := parsePRURL(url)
+	if err != nil {
+		return nil, errors.Wrap(err,
+			fmt.Sprintf("could not parse pull request URL %q", url))
+	}
+	result.org = org
+	result.repo = repo
+	result.id = id
 
-		result := &results[i]
-		result.url = url
+	pullRequest, _, err := clients.github.PullRequests.Get(ctx,
+		result.org, result.repo, result.id)
+	if err != nil {
+		return nil, errors.Wrap(err,
+			fmt.Sprintf("could not fetch pull request %q", url))
+	}
 
-		// parse the URL to find the args we need for interacting with
-		// github's API
-		org, repo, id, err := parsePRURL(url)
+	prWithStatus, err := getPRStatus(settings, clients, pullRequest)
+	if err != nil {
+		return nil, errors.Wrap(err,
+			fmt.Sprintf("could not get status of %s", *pullRequest.HTMLURL))
+	}
+	result.prWithStatus = prWithStatus
+
+	if result.org == settings.DownstreamOrg {
+		return result, nil
+	}
+
+	if prWithStatus.status == "closed" {
+		// We don't care if there is no matching downstream PR if
+		// we closed the upstream one without merging it.
+		return result, nil
+	}
+
+	commits, _, err := clients.github.PullRequests.ListCommits(
+		ctx, result.org, result.repo, result.id, nil)
+	if err != nil {
+		return nil, errors.Wrap(err,
+			fmt.Sprintf("could not list commits in pull request %q", url))
+	}
+
+	otherIDs := make(map[int]bool)
+	otherLinks := []string{}
+	for _, c := range commits {
+		otherPRs, _, err := clients.github.PullRequests.ListPullRequestsWithCommit(
+			ctx, settings.DownstreamOrg, result.repo, *c.SHA, nil)
 		if err != nil {
-			return nil, errors.Wrap(err,
-				fmt.Sprintf("could not parse pull request URL %q", url))
-		}
-		result.org = org
-		result.repo = repo
-		result.id = id
-
-		pullRequest, _, err := clients.github.PullRequests.Get(ctx,
-			result.org, result.repo, result.id)
-		if err != nil {
-			return nil, errors.Wrap(err,
-				fmt.Sprintf("could not fetch pull request %q", url))
+			return nil, errors.Wrap(err, "could not find downstream pull requests")
 		}
 
-		prWithStatus, err := getPRStatus(settings, clients, pullRequest)
-		if err != nil {
-			return nil, errors.Wrap(err,
-				fmt.Sprintf("could not get status of %s", *pullRequest.HTMLURL))
-		}
-		result.prWithStatus = prWithStatus
-
-		if result.org == settings.DownstreamOrg {
-			continue
-		}
-
-		if prWithStatus.status == "closed" {
-			// We don't care if there is no matching downstream PR if
-			// we closed the upstream one without merging it.
-			continue
-		}
-
-		commits, _, err := clients.github.PullRequests.ListCommits(
-			ctx, result.org, result.repo, result.id, nil)
-		if err != nil {
-			return nil, errors.Wrap(err,
-				fmt.Sprintf("could not list commits in pull request %q", url))
+		// look for pull requests containing the same commits via
+		// the github API
+		for _, otherPR := range otherPRs {
+			if *otherPR.HTMLURL == url {
+				// the API returns our own PR even when we ask
+				// for the ones from the downstream PR
+				continue
+			}
+			if _, ok := otherIDs[*otherPR.Number]; ok {
+				// ignore duplicate PRs
+				continue
+			}
+			otherIDs[*otherPR.Number] = true
+			otherLinks = append(otherLinks, *otherPR.HTMLURL)
 		}
 
-		otherIDs := make(map[int]bool)
-		for _, c := range commits {
-			otherPRs, _, err := clients.github.PullRequests.ListPullRequestsWithCommit(
-				ctx, settings.DownstreamOrg, result.repo, *c.SHA, nil)
+		// look in the cache for commit messages that include the
+		// SHA, indicating a reference during a cherry-pick
+		if len(otherIDs) == 0 {
+			cachedDetails, err := cache.getDetails(settings, clients,
+				settings.DownstreamOrg, repo)
 			if err != nil {
-				return nil, errors.Wrap(err, "could not find downstream pull requests")
+				return nil, errors.Wrap(err,
+					fmt.Sprintf("could not build cache of details for %s/%s",
+						settings.DownstreamOrg, repo))
 			}
-
-			// look for pull requests containing the same commits via
-			// the github API
-			for _, otherPR := range otherPRs {
-				if *otherPR.HTMLURL == url {
-					// the API returns our own PR even when we ask
-					// for the ones from the downstream PR
-					continue
-				}
-				if _, ok := otherIDs[*otherPR.Number]; ok {
-					// ignore duplicate PRs
-					continue
-				}
-				otherIDs[*otherPR.Number] = true
-
-				otherWithStatus, err := getPRStatus(settings, clients, otherPR)
-				if err != nil {
-					return nil, errors.Wrap(err,
-						fmt.Sprintf("could not get status of %s", *otherPR.HTMLURL))
-				}
-				org, repo, id, err := parsePRURL(*otherPR.HTMLURL)
-				if err != nil {
-					return nil, errors.Wrap(err,
-						fmt.Sprintf("could not parse pull request URL %q", *otherPR.HTMLURL))
-				}
-				result.others = append(result.others, linkResult{
-					url:          *otherPR.HTMLURL,
-					org:          org,
-					repo:         repo,
-					id:           id,
-					prWithStatus: otherWithStatus,
-				})
-			}
-
-			// look in the cache for commit messages that include the
-			// SHA, indicating a reference during a cherry-pick
-			if len(otherIDs) == 0 {
-				cachedDetails, err := cache.getDetails(settings, clients,
-					settings.DownstreamOrg, repo)
-				if err != nil {
-					return nil, errors.Wrap(err,
-						fmt.Sprintf("could not build cache of details for %s/%s",
-							settings.DownstreamOrg, repo))
-				}
-				for _, pr := range cachedDetails.pullRequests {
-					for _, otherCommit := range cachedDetails.commits[*pr.Number] {
-						if strings.Contains(*otherCommit.Commit.Message, *c.SHA) {
-							if _, ok := otherIDs[*pr.Number]; ok {
-								// ignore duplicate PRs
-								continue
-							}
-							otherIDs[*pr.Number] = true
-							otherWithStatus, err := getPRStatus(settings, clients, pr)
-							if err != nil {
-								return nil, errors.Wrap(err,
-									fmt.Sprintf("could not get status of %s", *pr.HTMLURL))
-							}
-							org, repo, id, err := parsePRURL(*pr.HTMLURL)
-							if err != nil {
-								return nil, errors.Wrap(err,
-									fmt.Sprintf("could not parse pull request URL %q",
-										*pr.HTMLURL))
-							}
-							result.others = append(result.others, linkResult{
-								url:          *pr.HTMLURL,
-								org:          org,
-								repo:         repo,
-								id:           id,
-								prWithStatus: otherWithStatus,
-							})
+			for _, pr := range cachedDetails.pullRequests {
+				for _, otherCommit := range cachedDetails.commits[*pr.Number] {
+					if strings.Contains(*otherCommit.Commit.Message, *c.SHA) {
+						if _, ok := otherIDs[*pr.Number]; ok {
+							// ignore duplicate PRs
+							continue
 						}
+						otherLinks = append(otherLinks, *pr.HTMLURL)
 					}
 				}
 			}
 		}
 	}
+	if len(otherLinks) > 0 {
+		otherResults, err := processLinks(settings, clients, cache, otherLinks)
+		if err != nil {
+			return nil, errors.Wrap(err,
+				fmt.Sprintf("could not process %s", url))
+		}
+		result.others = otherResults
+	}
+
+	return result, nil
+}
+
+func processLinks(settings *appSettings, clients *serviceClients, cache *cache, links []string) ([]*linkResult, error) {
+
+	results := make([]*linkResult, len(links))
+
+	for i, url := range links {
+		result, err := processOneLink(settings, clients, cache, url)
+		if err != nil {
+			return nil, errors.Wrap(err,
+				fmt.Sprintf("failed to get details for %s", url))
+		}
+		results[i] = result
+	}
 	return results, nil
 }
 
-func showLinkResults(settings *appSettings, results []linkResult, indent string) {
+func showLinkResults(settings *appSettings, results []*linkResult, indent string) {
 	for _, result := range results {
 
 		if result.org == settings.DownstreamOrg {
