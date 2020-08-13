@@ -59,6 +59,15 @@ type pullRequestWithStatus struct {
 	status string
 }
 
+type linkResult struct {
+	url          string
+	org          string
+	repo         string
+	id           int
+	prWithStatus pullRequestWithStatus
+	others       []linkResult
+}
+
 const githubPageSize int = 50
 
 func (c *cache) getDetails(settings *appSettings, clients *serviceClients, org, repo string) (*repoPRCache, error) {
@@ -200,7 +209,7 @@ func getPRStatus(settings *appSettings, clients *serviceClients, pullRequest *gi
 	return result, nil
 }
 
-func showPRStatus(settings *appSettings, clients *serviceClients, pullRequest pullRequestWithStatus, prefix string) {
+func showPRStatus(settings *appSettings, pullRequest pullRequestWithStatus, prefix string) {
 	fmt.Printf("%s on %s %s: %s \"%s\"\n",
 		prefix,
 		*pullRequest.pull.Base.Ref,
@@ -210,43 +219,57 @@ func showPRStatus(settings *appSettings, clients *serviceClients, pullRequest pu
 	)
 }
 
-func processLinks(settings *appSettings, clients *serviceClients, cache *cache, links []string, indent string) error {
+func parsePRURL(url string) (org, repo string, id int, err error) {
+	match := pullRequestURLPattern.FindStringSubmatch(url)
+	org = match[1]
+	repo = match[2]
+	idStr := match[3]
+	id, err = strconv.Atoi(idStr)
+	if err != nil {
+		err = errors.Wrap(err,
+			fmt.Sprintf("could not convert pull request id %q to integer", idStr))
+	}
+	return
+}
+
+func processLinks(settings *appSettings, clients *serviceClients, cache *cache, links []string, indent string) ([]linkResult, error) {
+
+	results := make([]linkResult, len(links))
 
 	ctx := context.Background()
-	for _, url := range links {
+	for i, url := range links {
+
+		result := &results[i]
+		result.url = url
 
 		// parse the URL to find the args we need for interacting with
 		// github's API
-		match := pullRequestURLPattern.FindStringSubmatch(url)
-		org := match[1]
-		repo := match[2]
-		idStr := match[3]
-		id, err := strconv.Atoi(idStr)
+		org, repo, id, err := parsePRURL(url)
 		if err != nil {
-			return errors.Wrap(err,
-				fmt.Sprintf("could not convert pull request id %q to integer", idStr))
+			return nil, errors.Wrap(err,
+				fmt.Sprintf("could not parse pull request URL %q", url))
 		}
+		result.org = org
+		result.repo = repo
+		result.id = id
 
-		pullRequest, _, err := clients.github.PullRequests.Get(ctx, org, repo, id)
+		pullRequest, _, err := clients.github.PullRequests.Get(ctx,
+			result.org, result.repo, result.id)
 		if err != nil {
-			return errors.Wrap(err,
-				fmt.Sprintf("could not fetch pull request %q", idStr))
+			return nil, errors.Wrap(err,
+				fmt.Sprintf("could not fetch pull request %q", url))
 		}
 
 		prWithStatus, err := getPRStatus(settings, clients, pullRequest)
 		if err != nil {
-			return errors.Wrap(err,
+			return nil, errors.Wrap(err,
 				fmt.Sprintf("could not get status of %s", *pullRequest.HTMLURL))
 		}
+		result.prWithStatus = prWithStatus
 
-		if org == settings.DownstreamOrg {
-			showPRStatus(settings, clients, prWithStatus,
-				fmt.Sprintf("%s  downstream", indent))
+		if result.org == settings.DownstreamOrg {
 			continue
 		}
-
-		showPRStatus(settings, clients, prWithStatus,
-			fmt.Sprintf("%s  upstream", indent))
 
 		if prWithStatus.status == "closed" {
 			// We don't care if there is no matching downstream PR if
@@ -255,18 +278,18 @@ func processLinks(settings *appSettings, clients *serviceClients, cache *cache, 
 		}
 
 		commits, _, err := clients.github.PullRequests.ListCommits(
-			ctx, org, repo, id, nil)
+			ctx, result.org, result.repo, result.id, nil)
 		if err != nil {
-			return errors.Wrap(err,
-				fmt.Sprintf("could not list commits in pull request %q", idStr))
+			return nil, errors.Wrap(err,
+				fmt.Sprintf("could not list commits in pull request %q", url))
 		}
 
 		otherIDs := make(map[int]bool)
 		for _, c := range commits {
 			otherPRs, _, err := clients.github.PullRequests.ListPullRequestsWithCommit(
-				ctx, settings.DownstreamOrg, repo, *c.SHA, nil)
+				ctx, settings.DownstreamOrg, result.repo, *c.SHA, nil)
 			if err != nil {
-				return errors.Wrap(err, "could not find downstream pull requests")
+				return nil, errors.Wrap(err, "could not find downstream pull requests")
 			}
 
 			// look for pull requests containing the same commits via
@@ -278,17 +301,28 @@ func processLinks(settings *appSettings, clients *serviceClients, cache *cache, 
 					continue
 				}
 				if _, ok := otherIDs[*otherPR.Number]; ok {
+					// ignore duplicate PRs
 					continue
 				}
 				otherIDs[*otherPR.Number] = true
 
 				otherWithStatus, err := getPRStatus(settings, clients, otherPR)
 				if err != nil {
-					return errors.Wrap(err,
+					return nil, errors.Wrap(err,
 						fmt.Sprintf("could not get status of %s", *otherPR.HTMLURL))
 				}
-				showPRStatus(settings, clients, otherWithStatus,
-					fmt.Sprintf("%s    downstream", indent))
+				org, repo, id, err := parsePRURL(*otherPR.HTMLURL)
+				if err != nil {
+					return nil, errors.Wrap(err,
+						fmt.Sprintf("could not parse pull request URL %q", *otherPR.HTMLURL))
+				}
+				result.others = append(result.others, linkResult{
+					url:          *otherPR.HTMLURL,
+					org:          org,
+					repo:         repo,
+					id:           id,
+					prWithStatus: otherWithStatus,
+				})
 			}
 
 			// look in the cache for commit messages that include the
@@ -297,7 +331,7 @@ func processLinks(settings *appSettings, clients *serviceClients, cache *cache, 
 				cachedDetails, err := cache.getDetails(settings, clients,
 					settings.DownstreamOrg, repo)
 				if err != nil {
-					return errors.Wrap(err,
+					return nil, errors.Wrap(err,
 						fmt.Sprintf("could not build cache of details for %s/%s",
 							settings.DownstreamOrg, repo))
 				}
@@ -305,30 +339,63 @@ func processLinks(settings *appSettings, clients *serviceClients, cache *cache, 
 					for _, otherCommit := range cachedDetails.commits[*pr.Number] {
 						if strings.Contains(*otherCommit.Commit.Message, *c.SHA) {
 							if _, ok := otherIDs[*pr.Number]; ok {
+								// ignore duplicate PRs
 								continue
 							}
 							otherIDs[*pr.Number] = true
 							otherWithStatus, err := getPRStatus(settings, clients, pr)
 							if err != nil {
-								return errors.Wrap(err,
+								return nil, errors.Wrap(err,
 									fmt.Sprintf("could not get status of %s", *pr.HTMLURL))
 							}
-							showPRStatus(settings, clients, otherWithStatus,
-								fmt.Sprintf("%s    downstream", indent))
+							org, repo, id, err := parsePRURL(*pr.HTMLURL)
+							if err != nil {
+								return nil, errors.Wrap(err,
+									fmt.Sprintf("could not parse pull request URL %q",
+										*pr.HTMLURL))
+							}
+							result.others = append(result.others, linkResult{
+								url:          *pr.HTMLURL,
+								org:          org,
+								repo:         repo,
+								id:           id,
+								prWithStatus: otherWithStatus,
+							})
 						}
 					}
 				}
 			}
 		}
+	}
+	return results, nil
+}
 
-		if len(otherIDs) == 0 {
-			fmt.Printf("%s    downstream: no matching pull requests found in %s/%s\n",
-				indent, settings.DownstreamOrg, repo,
+func showLinkResults(settings *appSettings, results []linkResult, indent string) {
+	for _, result := range results {
+
+		if result.org == settings.DownstreamOrg {
+			showPRStatus(settings, result.prWithStatus,
+				fmt.Sprintf("%sdownstream", indent))
+			continue
+		}
+
+		showPRStatus(settings, result.prWithStatus,
+			fmt.Sprintf("%supstream", indent))
+
+		if result.prWithStatus.status == "closed" {
+			// We don't care if there is no matching downstream PR if
+			// we closed the upstream one without merging it.
+			continue
+		}
+
+		if len(result.others) == 0 {
+			fmt.Printf("%s  downstream: no matching pull requests found in %s/%s\n",
+				indent, settings.DownstreamOrg, result.repo,
 			)
 			continue
 		}
+		showLinkResults(settings, result.others, indent+"  ")
 	}
-	return nil
 }
 
 func processOneIssue(settings *appSettings, clients *serviceClients, cache *cache, issueID string, indent string) error {
@@ -338,12 +405,16 @@ func processOneIssue(settings *appSettings, clients *serviceClients, cache *cach
 	}
 	fmt.Printf("\n%s%s\n", indent, issueTitleLine(issue, settings.Jira.URL))
 
-	// processLinks(settings, clients, cache, getLinks(issue))
 	links := getLinks(issue)
 	if len(links) == 0 {
 		fmt.Printf("%s  no github links found\n", indent)
 	} else {
-		processLinks(settings, clients, cache, links, indent+"  ")
+		linkResults, err := processLinks(settings, clients, cache, links, indent+"  ")
+		if err != nil {
+			return errors.Wrap(err,
+				fmt.Sprintf("failed processing links in %s", issueID))
+		}
+		showLinkResults(settings, linkResults, indent+"  ")
 	}
 
 	switch issue.Fields.Type.Name {
