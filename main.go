@@ -77,10 +77,10 @@ type linkResult struct {
 	others       []linkResult
 }
 
-type ticketResult struct {
-	ticket      *jira.Issue
+type issueResult struct {
+	issue       *jira.Issue
 	linkResults []linkResult
-	children    []*ticketResult
+	children    []*issueResult
 }
 
 const githubPageSize int = 50
@@ -401,14 +401,14 @@ func showLinkResults(settings *appSettings, results []linkResult, indent string)
 	}
 }
 
-func processOneIssue(settings *appSettings, clients *serviceClients, cache *cache, issueID string, indent string) (*ticketResult, error) {
-	result := &ticketResult{}
+func processOneIssue(settings *appSettings, clients *serviceClients, cache *cache, issueID string, indent string) (*issueResult, error) {
+	result := &issueResult{}
 
 	issue, _, err := clients.jira.Issue.Get(issueID, nil)
 	if err != nil {
 		return nil, errors.Wrap(err, fmt.Sprintf("error processing issue %q", issueID))
 	}
-	result.ticket = issue
+	result.issue = issue
 
 	links := getLinks(issue)
 	if len(links) != 0 {
@@ -433,7 +433,7 @@ func processOneIssue(settings *appSettings, clients *serviceClients, cache *cach
 		children, _, err := clients.jira.Issue.Search(search, &searchOptions)
 		if err != nil {
 			return nil, errors.Wrap(err,
-				fmt.Sprintf("could not find sub-tickets related to %s", issueID))
+				fmt.Sprintf("could not find sub-issues related to %s", issueID))
 		}
 
 		for _, child := range children {
@@ -456,15 +456,15 @@ func processOneIssue(settings *appSettings, clients *serviceClients, cache *cach
 	return result, nil
 }
 
-func showOneTicketResult(settings *appSettings, result *ticketResult, indent string) {
-	fmt.Printf("\n%s%s\n", indent, issueTitleLine(result.ticket, settings.Jira.URL))
+func showOneIssueResult(settings *appSettings, result *issueResult, indent string) {
+	fmt.Printf("\n%s%s\n", indent, issueTitleLine(result.issue, settings.Jira.URL))
 	if len(result.linkResults) == 0 {
 		fmt.Printf("%s  no github links found\n", indent)
 	} else {
 		showLinkResults(settings, result.linkResults, indent+"  ")
 	}
 	for _, child := range result.children {
-		showOneTicketResult(settings, child, indent+"  ")
+		showOneIssueResult(settings, child, indent+"  ")
 	}
 }
 
@@ -543,7 +543,7 @@ func main() {
 		if err != nil {
 			fmt.Printf("ERROR: %s\n", err)
 		}
-		showOneTicketResult(settings, result, "")
+		showOneIssueResult(settings, result, "")
 	}
 
 }
