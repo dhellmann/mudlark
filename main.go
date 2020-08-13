@@ -151,6 +151,19 @@ func issueTitleLine(issue *jira.Issue, jiraURL string) string {
 	)
 }
 
+func uniqueStrings(in []string) []string {
+	out := []string{}
+	keys := make(map[string]bool)
+	for _, s := range in {
+		if _, ok := keys[s]; ok {
+			continue
+		}
+		keys[s] = true
+		out = append(out, s)
+	}
+	return out
+}
+
 func getLinks(issue *jira.Issue) []string {
 	results := []string{}
 
@@ -164,7 +177,7 @@ func getLinks(issue *jira.Issue) []string {
 		}
 	}
 
-	return results
+	return uniqueStrings(results)
 }
 
 func getPRStatus(settings *appSettings, clients *serviceClients, pullRequest *github.PullRequest) (pullRequestWithStatus, error) {
