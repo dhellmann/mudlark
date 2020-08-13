@@ -59,6 +59,15 @@ type pullRequestWithStatus struct {
 	status string
 }
 
+func (pr pullRequestWithStatus) String() string {
+	return fmt.Sprintf("on %s %s: %s \"%s\"",
+		*pr.pull.Base.Ref,
+		pr.status,
+		*pr.pull.HTMLURL,
+		*pr.pull.Title,
+	)
+}
+
 type linkResult struct {
 	url          string
 	org          string
@@ -66,6 +75,12 @@ type linkResult struct {
 	id           int
 	prWithStatus pullRequestWithStatus
 	others       []linkResult
+}
+
+type ticketResult struct {
+	ticket      *jira.Issue
+	linkResults []linkResult
+	children    []*ticketResult
 }
 
 const githubPageSize int = 50
@@ -207,16 +222,6 @@ func getPRStatus(settings *appSettings, clients *serviceClients, pullRequest *gi
 		result.status = "OPEN"
 	}
 	return result, nil
-}
-
-func showPRStatus(settings *appSettings, pullRequest pullRequestWithStatus, prefix string) {
-	fmt.Printf("%s on %s %s: %s \"%s\"\n",
-		prefix,
-		*pullRequest.pull.Base.Ref,
-		pullRequest.status,
-		*pullRequest.pull.HTMLURL,
-		*pullRequest.pull.Title,
-	)
 }
 
 func parsePRURL(url string) (org, repo string, id int, err error) {
@@ -374,13 +379,11 @@ func showLinkResults(settings *appSettings, results []linkResult, indent string)
 	for _, result := range results {
 
 		if result.org == settings.DownstreamOrg {
-			showPRStatus(settings, result.prWithStatus,
-				fmt.Sprintf("%sdownstream", indent))
+			fmt.Printf("%sdownstream %s\n", indent, result.prWithStatus)
 			continue
 		}
 
-		showPRStatus(settings, result.prWithStatus,
-			fmt.Sprintf("%supstream", indent))
+		fmt.Printf("%supstream %s\n", indent, result.prWithStatus)
 
 		if result.prWithStatus.status == "closed" {
 			// We don't care if there is no matching downstream PR if
@@ -398,23 +401,23 @@ func showLinkResults(settings *appSettings, results []linkResult, indent string)
 	}
 }
 
-func processOneIssue(settings *appSettings, clients *serviceClients, cache *cache, issueID string, indent string) error {
+func processOneIssue(settings *appSettings, clients *serviceClients, cache *cache, issueID string, indent string) (*ticketResult, error) {
+	result := &ticketResult{}
+
 	issue, _, err := clients.jira.Issue.Get(issueID, nil)
 	if err != nil {
-		return errors.Wrap(err, fmt.Sprintf("error processing issue %q", issueID))
+		return nil, errors.Wrap(err, fmt.Sprintf("error processing issue %q", issueID))
 	}
-	fmt.Printf("\n%s%s\n", indent, issueTitleLine(issue, settings.Jira.URL))
+	result.ticket = issue
 
 	links := getLinks(issue)
-	if len(links) == 0 {
-		fmt.Printf("%s  no github links found\n", indent)
-	} else {
+	if len(links) != 0 {
 		linkResults, err := processLinks(settings, clients, cache, links, indent+"  ")
 		if err != nil {
-			return errors.Wrap(err,
+			return nil, errors.Wrap(err,
 				fmt.Sprintf("failed processing links in %s", issueID))
 		}
-		showLinkResults(settings, linkResults, indent+"  ")
+		result.linkResults = linkResults
 	}
 
 	switch issue.Fields.Type.Name {
@@ -429,26 +432,40 @@ func processOneIssue(settings *appSettings, clients *serviceClients, cache *cach
 		search := fmt.Sprintf("\"%s\" = %s", searchTerm, issueID)
 		children, _, err := clients.jira.Issue.Search(search, &searchOptions)
 		if err != nil {
-			return errors.Wrap(err,
+			return nil, errors.Wrap(err,
 				fmt.Sprintf("could not find sub-tickets related to %s", issueID))
 		}
 
 		for _, child := range children {
-			err := processOneIssue(settings, clients, cache, child.Key, indent+"  ")
+			childResult, err := processOneIssue(settings, clients, cache, child.Key, indent+"  ")
 			if err != nil {
-				return errors.Wrap(err, fmt.Sprintf("could not process %s", child.Key))
+				return nil, errors.Wrap(err, fmt.Sprintf("could not process %s", child.Key))
 			}
+			result.children = append(result.children, childResult)
 		}
 	case "Story":
 		for _, task := range issue.Fields.Subtasks {
-			err := processOneIssue(settings, clients, cache, task.Key, indent+"  ")
+			childResult, err := processOneIssue(settings, clients, cache, task.Key, indent+"  ")
 			if err != nil {
-				return errors.Wrap(err, fmt.Sprintf("could not process %s", task.Key))
+				return nil, errors.Wrap(err, fmt.Sprintf("could not process %s", task.Key))
 			}
+			result.children = append(result.children, childResult)
 		}
 	default:
 	}
-	return nil
+	return result, nil
+}
+
+func showOneTicketResult(settings *appSettings, result *ticketResult, indent string) {
+	fmt.Printf("\n%s%s\n", indent, issueTitleLine(result.ticket, settings.Jira.URL))
+	if len(result.linkResults) == 0 {
+		fmt.Printf("%s  no github links found\n", indent)
+	} else {
+		showLinkResults(settings, result.linkResults, indent+"  ")
+	}
+	for _, child := range result.children {
+		showOneTicketResult(settings, child, indent+"  ")
+	}
 }
 
 // fileExists checks if a file exists and is not a directory before we
@@ -522,10 +539,11 @@ func main() {
 	}
 
 	for _, issueID := range flag.Args() {
-		err := processOneIssue(settings, clients, cache, issueID, "")
+		result, err := processOneIssue(settings, clients, cache, issueID, "")
 		if err != nil {
 			fmt.Printf("ERROR: %s\n", err)
 		}
+		showOneTicketResult(settings, result, "")
 	}
 
 }
