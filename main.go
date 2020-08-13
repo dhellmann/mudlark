@@ -383,9 +383,11 @@ func processLinks(settings *appSettings, clients *serviceClients, cache *cache, 
 	for result := range resultChan {
 		resultsByURL[result.url] = result
 	}
-	results := make([]*linkResult, len(links))
-	for i, url := range links {
-		results[i] = resultsByURL[url]
+	results := []*linkResult{}
+	for _, url := range links {
+		if result, ok := resultsByURL[url]; ok {
+			results = append(results, result)
+		}
 	}
 	return results, nil
 }
@@ -521,9 +523,11 @@ func processIssues(settings *appSettings, clients *serviceClients, cache *cache,
 	for result := range resultChan {
 		resultsByID[result.issue.Key] = result
 	}
-	results := make([]*issueResult, len(ids))
-	for i, id := range ids {
-		results[i] = resultsByID[id]
+	results := []*issueResult{}
+	for _, id := range ids {
+		if result, ok := resultsByID[id]; ok {
+			results = append(results, result)
+		}
 	}
 	return results
 }
