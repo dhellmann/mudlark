@@ -358,15 +358,34 @@ func processOneLink(settings *appSettings, clients *serviceClients, cache *cache
 
 func processLinks(settings *appSettings, clients *serviceClients, cache *cache, links []string) ([]*linkResult, error) {
 
-	results := make([]*linkResult, len(links))
+	var wg sync.WaitGroup
+	resultChan := make(chan *linkResult)
 
+	for _, url := range links {
+		wg.Add(1)
+		go func(url string, ch chan<- *linkResult) {
+			defer wg.Done()
+			result, err := processOneLink(settings, clients, cache, url)
+			if err != nil {
+				fmt.Printf("failed to get details for %s: %s\n", url, err)
+				return
+			}
+			ch <- result
+		}(url, resultChan)
+	}
+
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	resultsByURL := make(map[string]*linkResult)
+	for result := range resultChan {
+		resultsByURL[result.url] = result
+	}
+	results := make([]*linkResult, len(links))
 	for i, url := range links {
-		result, err := processOneLink(settings, clients, cache, url)
-		if err != nil {
-			return nil, errors.Wrap(err,
-				fmt.Sprintf("failed to get details for %s", url))
-		}
-		results[i] = result
+		results[i] = resultsByURL[url]
 	}
 	return results, nil
 }
