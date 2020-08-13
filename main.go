@@ -54,6 +54,11 @@ type cache struct {
 	pullRequestsByRepo map[string]repoPRCache
 }
 
+type pullRequestWithStatus struct {
+	pull   *github.PullRequest
+	status string
+}
+
 const githubPageSize int = 50
 
 func (c *cache) getDetails(settings *appSettings, clients *serviceClients, org, repo string) (*repoPRCache, error) {
@@ -162,31 +167,34 @@ func getLinks(issue *jira.Issue) []string {
 	return results
 }
 
-func showPRStatus(settings *appSettings, clients *serviceClients, pullRequest *github.PullRequest, prefix string) (string, error) {
+func getPRStatus(settings *appSettings, clients *serviceClients, pullRequest *github.PullRequest) (pullRequestWithStatus, error) {
+	result := pullRequestWithStatus{pull: pullRequest}
 	ctx := context.Background()
-	status := *pullRequest.State
+	result.status = *pullRequest.State
 	isMerged, _, err := clients.github.PullRequests.IsMerged(ctx,
 		*pullRequest.Base.Repo.Owner.Login, *pullRequest.Base.Repo.Name, *pullRequest.Number)
 	if err != nil {
-		return "", errors.Wrap(err,
+		return result, errors.Wrap(err,
 			fmt.Sprintf("could not fetch merge status of pull request %d",
 				*pullRequest.Number))
 	}
 	if isMerged {
-		status = "merged"
+		result.status = "merged"
 	}
-	if status == "open" {
-		status = "OPEN"
+	if result.status == "open" {
+		result.status = "OPEN"
 	}
+	return result, nil
+}
 
+func showPRStatus(settings *appSettings, clients *serviceClients, pullRequest pullRequestWithStatus, prefix string) {
 	fmt.Printf("%s on %s %s: %s \"%s\"\n",
 		prefix,
-		*pullRequest.Base.Ref,
-		status,
-		*pullRequest.HTMLURL,
-		*pullRequest.Title,
+		*pullRequest.pull.Base.Ref,
+		pullRequest.status,
+		*pullRequest.pull.HTMLURL,
+		*pullRequest.pull.Title,
 	)
-	return status, nil
 }
 
 func processLinks(settings *appSettings, clients *serviceClients, cache *cache, links []string, indent string) error {
@@ -212,24 +220,22 @@ func processLinks(settings *appSettings, clients *serviceClients, cache *cache, 
 				fmt.Sprintf("could not fetch pull request %q", idStr))
 		}
 
+		prWithStatus, err := getPRStatus(settings, clients, pullRequest)
+		if err != nil {
+			return errors.Wrap(err,
+				fmt.Sprintf("could not get status of %s", *pullRequest.HTMLURL))
+		}
+
 		if org == settings.DownstreamOrg {
-			_, err := showPRStatus(settings, clients, pullRequest,
+			showPRStatus(settings, clients, prWithStatus,
 				fmt.Sprintf("%s  downstream", indent))
-			if err != nil {
-				return errors.Wrap(err,
-					fmt.Sprintf("could not show status of %s", *pullRequest.HTMLURL))
-			}
 			continue
 		}
 
-		status, err := showPRStatus(settings, clients, pullRequest,
+		showPRStatus(settings, clients, prWithStatus,
 			fmt.Sprintf("%s  upstream", indent))
-		if err != nil {
-			return errors.Wrap(err,
-				fmt.Sprintf("could not show status of %s", *pullRequest.HTMLURL))
-		}
 
-		if status == "closed" {
+		if prWithStatus.status == "closed" {
 			// We don't care if there is no matching downstream PR if
 			// we closed the upstream one without merging it.
 			continue
@@ -263,7 +269,12 @@ func processLinks(settings *appSettings, clients *serviceClients, cache *cache, 
 				}
 				otherIDs[*otherPR.Number] = true
 
-				showPRStatus(settings, clients, otherPR,
+				otherWithStatus, err := getPRStatus(settings, clients, otherPR)
+				if err != nil {
+					return errors.Wrap(err,
+						fmt.Sprintf("could not get status of %s", *otherPR.HTMLURL))
+				}
+				showPRStatus(settings, clients, otherWithStatus,
 					fmt.Sprintf("%s    downstream", indent))
 			}
 
@@ -284,7 +295,12 @@ func processLinks(settings *appSettings, clients *serviceClients, cache *cache, 
 								continue
 							}
 							otherIDs[*pr.Number] = true
-							showPRStatus(settings, clients, pr,
+							otherWithStatus, err := getPRStatus(settings, clients, pr)
+							if err != nil {
+								return errors.Wrap(err,
+									fmt.Sprintf("could not get status of %s", *pr.HTMLURL))
+							}
+							showPRStatus(settings, clients, otherWithStatus,
 								fmt.Sprintf("%s    downstream", indent))
 						}
 					}
