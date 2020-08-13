@@ -237,7 +237,7 @@ func parsePRURL(url string) (org, repo string, id int, err error) {
 	return
 }
 
-func processLinks(settings *appSettings, clients *serviceClients, cache *cache, links []string, indent string) ([]linkResult, error) {
+func processLinks(settings *appSettings, clients *serviceClients, cache *cache, links []string) ([]linkResult, error) {
 
 	results := make([]linkResult, len(links))
 
@@ -401,7 +401,7 @@ func showLinkResults(settings *appSettings, results []linkResult, indent string)
 	}
 }
 
-func processOneIssue(settings *appSettings, clients *serviceClients, cache *cache, issueID string, indent string) (*issueResult, error) {
+func processOneIssue(settings *appSettings, clients *serviceClients, cache *cache, issueID string) (*issueResult, error) {
 	result := &issueResult{}
 
 	issue, _, err := clients.jira.Issue.Get(issueID, nil)
@@ -412,7 +412,7 @@ func processOneIssue(settings *appSettings, clients *serviceClients, cache *cach
 
 	links := getLinks(issue)
 	if len(links) != 0 {
-		linkResults, err := processLinks(settings, clients, cache, links, indent+"  ")
+		linkResults, err := processLinks(settings, clients, cache, links)
 		if err != nil {
 			return nil, errors.Wrap(err,
 				fmt.Sprintf("failed processing links in %s", issueID))
@@ -437,7 +437,7 @@ func processOneIssue(settings *appSettings, clients *serviceClients, cache *cach
 		}
 
 		for _, child := range children {
-			childResult, err := processOneIssue(settings, clients, cache, child.Key, indent+"  ")
+			childResult, err := processOneIssue(settings, clients, cache, child.Key)
 			if err != nil {
 				return nil, errors.Wrap(err, fmt.Sprintf("could not process %s", child.Key))
 			}
@@ -445,7 +445,7 @@ func processOneIssue(settings *appSettings, clients *serviceClients, cache *cach
 		}
 	case "Story":
 		for _, task := range issue.Fields.Subtasks {
-			childResult, err := processOneIssue(settings, clients, cache, task.Key, indent+"  ")
+			childResult, err := processOneIssue(settings, clients, cache, task.Key)
 			if err != nil {
 				return nil, errors.Wrap(err, fmt.Sprintf("could not process %s", task.Key))
 			}
