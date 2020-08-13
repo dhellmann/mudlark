@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/andygrunwald/go-jira"
 	"github.com/google/go-github/v32/github"
@@ -52,6 +53,7 @@ type repoPRCache struct {
 
 type cache struct {
 	pullRequestsByRepo map[string]repoPRCache
+	mutex              sync.Mutex
 }
 
 type pullRequestWithStatus struct {
@@ -86,6 +88,9 @@ type issueResult struct {
 const githubPageSize int = 50
 
 func (c *cache) getDetails(settings *appSettings, clients *serviceClients, org, repo string) (*repoPRCache, error) {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
 	ctx := context.Background()
 	repoKey := fmt.Sprintf("%s/%s", org, repo)
 	prCache, ok := c.pullRequestsByRepo[repoKey]
@@ -104,6 +109,7 @@ func (c *cache) getDetails(settings *appSettings, clients *serviceClients, org, 
 			},
 		}
 
+		fmt.Printf("building cache of PRs for %s/%s\n", org, repo)
 		for {
 			prs, response, err := clients.github.PullRequests.List(ctx, org, repo, opts)
 			if err != nil {
@@ -478,6 +484,42 @@ func fileExists(filename string) bool {
 	return !info.IsDir()
 }
 
+func processIssues(settings *appSettings, clients *serviceClients, cache *cache, ids []string) []*issueResult {
+
+	var wg sync.WaitGroup
+	resultChan := make(chan *issueResult)
+
+	for _, issueID := range ids {
+		wg.Add(1)
+		go func(issueID string, ch chan<- *issueResult) {
+			defer wg.Done()
+			result, err := processOneIssue(settings, clients, cache, issueID)
+			if err != nil {
+				fmt.Printf("ERROR: %s\n", err)
+				return
+			}
+			ch <- result
+		}(issueID, resultChan)
+	}
+
+	go func() {
+		wg.Wait()
+		close(resultChan)
+	}()
+
+	// Hold the results in a map until we have them all, then return
+	// them in the order the caller asked for them.
+	resultsByID := make(map[string]*issueResult)
+	for result := range resultChan {
+		resultsByID[result.issue.Key] = result
+	}
+	results := make([]*issueResult, len(ids))
+	for i, id := range ids {
+		results[i] = resultsByID[id]
+	}
+	return results
+}
+
 func main() {
 	configDir, err := os.UserConfigDir()
 	if err != nil {
@@ -538,12 +580,8 @@ func main() {
 		pullRequestsByRepo: make(map[string]repoPRCache),
 	}
 
-	for _, issueID := range flag.Args() {
-		result, err := processOneIssue(settings, clients, cache, issueID, "")
-		if err != nil {
-			fmt.Printf("ERROR: %s\n", err)
-			continue
-		}
+	results := processIssues(settings, clients, cache, flag.Args())
+	for _, result := range results {
 		showOneIssueResult(settings, result, "")
 	}
 
